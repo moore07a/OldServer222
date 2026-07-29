@@ -152,85 +152,6 @@ function boundedMapSet(map, key, value, maxEntries) {
 const RATE_LIMIT_WINDOW_SECONDS = readPositiveIntEnv("RATE_LIMIT_WINDOW_SECONDS", 60);
 const RATE_LIMIT_MAX_REQUESTS = readPositiveIntEnv("RATE_LIMIT_MAX_REQUESTS", 100);
 
-// Scanner probe path prefixes used for fast O(1) string matching (Change 1)
-const SCANNER_PROBE_EXACT_PATHS = new Set([
-  "env", "env.backup", "env.bak", "env.old", "env.txt",
-  "wp", "old", "login", "register", "user/login",
-  "application.yml", "application.yaml", "application-production.properties",
-  "dockerfile", "local.settings.json", "settings.py", "local_settings.py",
-  "settings/production.py", "var/log/app.log", ".yarnrc.yml",
-  "heapdump", "threaddump", "dump", "trace", "logfile", "configprops",
-  "api/env", "api/heapdump", "api/threaddump", "api/dump",
-  "api/trace", "api/logfile", "api/configprops",
-  "_profiler", "profiler", "profiler/phpinfo", "_ignition/execute-solution",
-  "helm/values.yaml",
-  "api-keys", "account/api-keys", "asset-manifest.json",
-  "assets-manifest.json", "manifest.json", "build-manifest.json",
-  "build/manifest.json", "webpack-stats.json", "loadable-stats.json",
-  "precache-manifest.json", "llms.txt", "swagger.json",
-  "var/task/serverless.yml", "var/task/serverless.yaml",
-  "var/task/serverless.json", "app/serverless.yml",
-  "app/serverless.yaml", "app/serverless.json",
-  "plugins/payments/stripe.json"
-]);
-
-const SCANNER_PROBE_PREFIXES = [
-  ".env", ".git", ".htaccess", ".htpasswd", ".DS_Store",
-  "wp-admin", "wp-login.php", "wp-config.php", "wp-includes", "wp-json",
-  "phpmyadmin", "pma", "myadmin",
-  "admin.php", "administrator",
-  "xmlrpc.php",
-  "cgi-bin",
-  "actuator", "actuator/", "api/actuator", "api/actuator/",
-  "server-status", "server-info",
-  "hnap1",
-  "boaform",
-  "vendor/phpunit",
-  "storage/logs",
-  "info.php", "phpinfo.php",
-  "shell.php", "cmd.php", "c99.php", "r57.php", "b374k.php",
-  "config.php", "setup.php", "install.php", "upgrade.php",
-  "backup.php", "db.php", "database.php",
-  "eval.php", "exec.php",
-  "webshell", "webadmin",
-  "console", "jmx-console", "web-console",
-  "solr/", "jenkins/", "hudson/",
-  "telescope/", "horizon/",
-  "_profiler/", "profiler/",
-  "debug/default/view",
-  "aws/credentials", ".aws/",
-  "docker-compose", "Dockerfile", "application.properties",
-  "config/database", "config/",
-  "server/php", "logs/", "tmp/", "templates/emails/", "utils/",
-  "firebase.json", ".firebaserc", "dnscfg.cgi",
-  "wp-content", "wordpress", "wp.php",
-  "feed/", "readme.html",
-  "node_modules",
-  "laravel/", "symfony/", "vendor/",
-  ".aws", ".docker",
-  ".next/", ".vite/", ".astro/", "_nuxt/",
-];
-
-const ARCHIVE_PROBE_SUFFIX_REGEX = /\.(?:zip|tar|tar\.gz|tgz|tar\.xz|tar\.bz2|7z|rar|gz|bz2|zst|sql|sql\.gz|sql\.bz2)$/i;
-const ARCHIVE_PROBE_NAME_REGEX = /^[a-z0-9._-]{2,80}$/i;
-
-const NESTED_SCANNER_SUBSTRINGS = [
-  "/.env", "/.env.", "/.git/", "/.git/config",
-  "/wp-login.php", "/wp-admin/", "/wp-includes/", "/wp-json/",
-  "/xmlrpc.php", "/wlwmanifest.xml",
-  "/.vscode/", "/sftp-config.json",
-  "/config/", "/backup/", "/database/",
-  "/symfony/public/_profiler/", "/_profiler/", "/profiler/", "/debug/default/view",
-  "/actuator/", "/heapdump", "/threaddump", "/configprops", "/logfile",
-  "/.next/", "/.vite/", "/.astro/", "/_nuxt/",
-  "/asset-manifest.json", "/assets-manifest.json", "/build-manifest.json",
-  "/required-server-files.json", "/webpack-stats.json", "/loadable-stats.json",
-  "/precache-manifest.json", "/swagger.json", "/serverless.yml",
-  "/serverless.yaml", "/serverless.json", "/plugins/payments/stripe.json",
-  "/templatedetails.xml",
-  "/vendor/phpunit/", "/phpmyadmin/", "/pma/"
-];
-
 const SCANNER_OPTIONAL_URL_PREFIX = String(process.env.OPTIONAL_URL_PREFIX || "")
   .trim()
   .replace(/^\/+|\/+$/g, "")
@@ -240,6 +161,11 @@ const SCANNER_OPTIONAL_URL_PREFIX = String(process.env.OPTIONAL_URL_PREFIX || ""
   .join("/");
 const createScannerProbeMatching = require("../scanner-security/scannerProbeMatching.js");
 const {
+  SCANNER_PROBE_EXACT_PATHS,
+  SCANNER_PROBE_PREFIXES,
+  ARCHIVE_PROBE_SUFFIX_REGEX,
+  ARCHIVE_PROBE_NAME_REGEX,
+  NESTED_SCANNER_SUBSTRINGS,
   decodePathForScannerMatching,
   SENSITIVE_CONFIG_PROBE_BASENAME_REGEX,
   SENSITIVE_CONFIG_PROBE_PATH_REGEX,
@@ -263,8 +189,7 @@ const {
   chooseScannerProbeCategory,
   pathMatchesUnknownScannerSkipPrefix,
  } = createScannerProbeMatching({
-  NESTED_SCANNER_SUBSTRINGS, OPTIONAL_URL_PREFIX: SCANNER_OPTIONAL_URL_PREFIX,
-  SCANNER_PROBE_EXACT_PATHS, SCANNER_PROBE_PREFIXES,
+  OPTIONAL_URL_PREFIX: SCANNER_OPTIONAL_URL_PREFIX,
   isLikelyArchiveProbePath: (...args) => isLikelyArchiveProbePath(...args),
   isLikelyEmail: (...args) => isLikelyEmail(...args),
   looksLikeHttpUrl: (...args) => looksLikeHttpUrl(...args),
