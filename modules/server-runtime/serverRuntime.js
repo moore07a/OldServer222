@@ -10,17 +10,16 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const DEFAULT_MAX_TIMER_MS = 2_147_483_647;
-
-function readMaxTimerMsEnv(name = "MAX_TIMER_MS", fallbackMs = DEFAULT_MAX_TIMER_MS) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return fallbackMs;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 1) return fallbackMs;
-  return Math.min(DEFAULT_MAX_TIMER_MS, Math.trunc(parsed));
-}
-
-const MAX_TIMER_MS = readMaxTimerMsEnv();
+const {
+  DEFAULT_MAX_TIMER_MS,
+  MAX_TIMER_MS,
+  readMaxTimerMsEnv,
+  clampMs,
+  readMsEnv,
+  readPositiveIntEnv,
+  evictOldestMapEntry,
+  boundedMapSet
+} = require("../runtime-utils/runtimeConfig.js");
 
 // fetch (Node 18+ has global fetch)
 let fetchFn = globalThis.fetch;
@@ -38,22 +37,6 @@ if (typeof fetchFn !== "function") {
 }
 const fetch = fetchFn;
 
-function clampMs(value, minMs = 0, maxMs = MAX_TIMER_MS) {
-  return Math.min(maxMs, Math.max(minMs, value));
-}
-
-function readMsEnv(name, defaultMs, minMs = 1000, maxMs = MAX_TIMER_MS) {
-  const raw = process.env[name];
-  const normalizedRaw = typeof raw === "string" ? raw.trim() : raw;
-  if (normalizedRaw == null || normalizedRaw === "") {
-    return clampMs(defaultMs, minMs, maxMs);
-  }
-  const parsed = Number(normalizedRaw);
-  const safe = Number.isFinite(parsed) ? Math.trunc(parsed) : defaultMs;
-  return clampMs(safe, minMs, maxMs);
-}
-
-
 const FETCH_TIMEOUT_MS_DEFAULT = readMsEnv("FETCH_TIMEOUT_MS", 8000, 1000);
 const REQUEST_TIMEOUT_MS = readMsEnv("REQUEST_TIMEOUT_MS", 30000, 1000);
 const SERVER_KEEP_ALIVE_TIMEOUT_MS = readMsEnv("SERVER_KEEP_ALIVE_TIMEOUT_MS", 5000, 1000);
@@ -62,16 +45,6 @@ const SERVER_HEADERS_TIMEOUT_MS = Math.max(
   readMsEnv("SERVER_HEADERS_TIMEOUT_MS", SERVER_KEEP_ALIVE_TIMEOUT_MS + 1000, SERVER_KEEP_ALIVE_TIMEOUT_MS + 1000)
 );
 const SHUTDOWN_GRACE_MS = readMsEnv("SHUTDOWN_GRACE_MS", 10000, 1000);
-function readPositiveIntEnv(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return fallback;
-  const value = Math.trunc(parsed);
-  if (value < 1) return fallback;
-  return value;
-}
-
 const SERVER_MAX_REQUESTS_PER_SOCKET = readPositiveIntEnv("SERVER_MAX_REQUESTS_PER_SOCKET", 1000);
 const MAX_CATCHALL_CONCURRENCY = readPositiveIntEnv("MAX_CATCHALL_CONCURRENCY", 200);
 const CIRCUIT_BREAKER_THRESHOLD = readPositiveIntEnv("CIRCUIT_BREAKER_THRESHOLD", 5);
@@ -118,35 +91,6 @@ const SCANNER_SAFE_HTML_ENABLED = ["1", "true", "yes", "on"].includes(
 const parseMinHourToMs = require("../runtime-utils/parseMinHourToMs.js");
 const eSCANNER_CONFIG_RELOAD_MS = parseMinHourToMs(process.env.eSCANNER_CONFIG_RELOAD_MS, 600000, "ms");
 // -------------------------------------------------
-
-function evictOldestMapEntry(map) {
-  if (!map || map.size <= 0) return false;
-  const oldest = map.keys().next();
-  if (!oldest || oldest.done) return false;
-  return map.delete(oldest.value);
-}
-
-function boundedMapSet(map, key, value, maxEntries) {
-  const cap = Number(maxEntries);
-  if (!map || !Number.isFinite(cap) || cap < 1) {
-    map.set(key, value);
-    return map;
-  }
-
-  if (map.has(key)) {
-    map.delete(key);
-  } else {
-    while (map.size >= cap) {
-      if (!evictOldestMapEntry(map)) break;
-    }
-  }
-
-  map.set(key, value);
-  while (map.size > cap) {
-    if (!evictOldestMapEntry(map)) break;
-  }
-  return map;
-}
 
 // Per-IP rate limiter (Change 3)
 const RATE_LIMIT_WINDOW_SECONDS = readPositiveIntEnv("RATE_LIMIT_WINDOW_SECONDS", 60);
@@ -977,109 +921,12 @@ const EXPECT_HOSTNAME_PATTERNS = EXPECT_HOSTNAME_ENTRIES
   .map(normalizeSuffixPattern)
   .filter(Boolean);
 
-// ================== CONFIGURATION VALIDATION ==================
-const normalizeTurnstileEnv = (value) => String(value || "").trim();
-
-function validateConfig() {
-  const errors = [];
-  const warnings = [];
-  const addConfigIssue = (message, { fatalInProduction = false } = {}) => {
-    const target = fatalInProduction && process.env.NODE_ENV === "production" ? errors : warnings;
-    target.push(message);
-  };
-  const isTurnstileKey = (value) => {
-    const trimmed = normalizeTurnstileEnv(value);
-    if (!trimmed) return false;
-    return /^(?:0x)?[0-9a-zA-Z_-]{20,}$/.test(trimmed);
-  };
-
-  // Validate AES keys (extra safety; loadKeysFromEnv already enforces this)
-  if (!AES_KEYS || AES_KEYS.length === 0) {
-    errors.push("No AES keys configured (set AES_KEYS, AES_KEY, or AES_KEY_HEX)");
-  } else {
-    AES_KEYS.forEach((key, idx) => {
-      if (key.length !== 32) {
-        errors.push(`AES key #${idx} must be 32 bytes, got ${key.length} bytes`);
-      }
-    });
-  }
-
-  // Validate allowlist configuration
-  if (ALLOWLIST_DOMAINS.length === 0) {
-    addConfigIssue("No allowlist domains configured - all redirects will be blocked unless explicitly allowed", { fatalInProduction: true });
-  }
-
-  if (EXPECT_HOSTNAME_INVALID_ENTRIES.length > 0) {
-    errors.push(`Invalid TURNSTILE_EXPECT_HOSTNAME pattern(s): ${EXPECT_HOSTNAME_INVALID_ENTRIES.join(",")}`);
-  }
-  if (EXPECT_HOSTNAME_ENTRIES.length > 0 && EXPECT_HOSTNAME_PATTERNS.length === 0) {
-    errors.push("TURNSTILE_EXPECT_HOSTNAME does not contain any valid host pattern");
-  }
-
-  // Validate TURNSTILE credentials format
-  const turnstileSitekey = normalizeTurnstileEnv(process.env.TURNSTILE_SITEKEY);
-  const turnstileSecret = normalizeTurnstileEnv(process.env.TURNSTILE_SECRET);
-  if (!isTurnstileKey(turnstileSitekey)) {
-    errors.push(`Invalid TURNSTILE_SITEKEY format (got: ${turnstileSitekey ? `${turnstileSitekey.slice(0, 8)}...` : "empty"})`);
-  }
-  if (!isTurnstileKey(turnstileSecret)) {
-    errors.push(`Invalid TURNSTILE_SECRET format (got: ${turnstileSecret ? `${turnstileSecret.slice(0, 8)}...` : "empty"})`);
-  }
-
-  // Validate timezone
-  const configuredTz = process.env.TIMEZONE || "UTC";
-  if (safeZone(configuredTz) !== configuredTz) {
-    warnings.push(`Invalid TIMEZONE: ${configuredTz}. Using UTC as fallback.`);
-  }
-
-  // Validate rate limit settings
-  if (RATE_CAPACITY < 1 || RATE_CAPACITY > 1000) {
-    errors.push(`RATE_CAPACITY must be between 1-1000, got ${RATE_CAPACITY}`);
-  }
-  if (RATE_WINDOW_SECONDS < 1 || RATE_WINDOW_SECONDS > 86400) {
-    errors.push(`RATE_WINDOW_SECONDS must be between 1-86400, got ${RATE_WINDOW_SECONDS}`);
-  }
-
-  // Validate admin token
-  if (!ADMIN_TOKEN || ADMIN_TOKEN.length < 16) {
-    addConfigIssue("ADMIN_TOKEN is weak or missing. Admin endpoints may be insecure.", { fatalInProduction: true });
-  }
-
-  // Validate INTERSTITIAL_BYPASS_SECRET
-  const bypassSecret = process.env.INTERSTITIAL_BYPASS_SECRET || "";
-  if (bypassSecret && bypassSecret.length < 8) {
-    addConfigIssue("INTERSTITIAL_BYPASS_SECRET is too short (min 8 chars)", { fatalInProduction: true });
-  }
-
-  return { errors, warnings };
-}
-
-// Run validation
-const configValidation = validateConfig();
-if (configValidation.errors.length > 0) {
-  console.error("❌ Configuration errors:");
-  configValidation.errors.forEach(err => console.error(`   ${err}`));
-  if (process.env.NODE_ENV === "production") process.exit(1);
-}
-if (configValidation.warnings.length > 0) {
-  console.warn("⚠️ Configuration warnings:");
-  configValidation.warnings.forEach(warn => console.warn(`   ${warn}`));
-}
-
-// Hardening: fail fast in production if ADMIN_TOKEN is weak/missing.
-if (process.env.NODE_ENV === "production" && (!ADMIN_TOKEN || ADMIN_TOKEN.length < 16)) {
-  console.error("❌ ADMIN_TOKEN must be set with at least 16 characters in production.");
-  process.exit(1);
-}
-
-function countryBlocked(country){
-  if (!country) return false;
-  if (ALLOWED_COUNTRIES.length && !ALLOWED_COUNTRIES.includes(country)) return true;
-  if (BLOCKED_COUNTRIES.includes(country)) return true;
-  return false;
-}
-
-function asnBlocked(asn){ return !!asn && BLOCKED_ASNS.includes(asn); }
+const createSecurityPolicy = require("../security-runtime/securityPolicy.js");
+const { normalizeTurnstileEnv, validateConfig, countryBlocked, asnBlocked } = createSecurityPolicy({
+  AES_KEYS, ADMIN_TOKEN, ALLOWLIST_DOMAINS, EXPECT_HOSTNAME_ENTRIES,
+  EXPECT_HOSTNAME_INVALID_ENTRIES, EXPECT_HOSTNAME_PATTERNS, RATE_CAPACITY,
+  RATE_WINDOW_SECONDS, safeZone
+});
 
 const createScannerDetection = require("../scanner-security/scannerDetection.js");
 const {
@@ -1204,8 +1051,13 @@ const limitTsClientLog = makeIpLimiter({ capacity: parseInt(process.env.TSLOG_CA
 const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAUTH_CAPACITY || "10",10), windowSec: parseInt(process.env.SSE_UNAUTH_WINDOW_SEC || "60",10),  keyPrefix: "sse_unauth" });
 const validationFailureLimiter = makeIpLimiter({ capacity: 10, windowSec: 300, keyPrefix: "validation_fail" });
 
-const adminHits = new Map();
-const ADMIN_HIT_TTL_MS = 10 * 60_000;
+
+const {
+  adminHits,
+  ADMIN_HIT_TTL_MS,
+  ADMIN_HIT_WINDOW_MS,
+  pruneAdminHits
+} = require("../runtime-routes/adminThrottle.js");
 
 const createRedirectCore = require("../redirect-core/redirectCore.js");
 const {
@@ -1320,17 +1172,8 @@ app.use(cors());
 app.use(express.json({ limit: "64kb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
-const ADMIN_HIT_WINDOW_MS = 60_000;
 
 
-function pruneAdminHits(now = Date.now()) {
-  for (const [ip, rec] of adminHits.entries()) {
-    const resetAt = Number(rec && rec.resetAt || 0);
-    if (!resetAt || now - resetAt > ADMIN_HIT_TTL_MS) {
-      adminHits.delete(ip);
-    }
-  }
-}
 
 app.use(["/view-log", "/__debug", "/admin"], (req, res, next) => {
   if (isAdmin(req) || isAdminSSE(req)) return next();
@@ -1397,15 +1240,14 @@ const {
   safeLogValue
 });
 // ================== INITIALIZATION ==================
-function initEnhancedPublicContent() {
-  if (!isPublicContentSurfaceEnabled()) return;
 
-  // Register all routes
-  registerEnhancedPublicRoutes();
-
-  // Start background traffic
-  startPublicBackgroundTraffic();
-}
+const createPublicStartup = require("../public-content/publicStartup.js");
+const { initEnhancedPublicContent, publicContentStartupSummaryLines } = createPublicStartup({
+  PUBLIC_CONTENT_SURFACE, PUBLIC_ENABLE_BACKGROUND, PUBLIC_TRAFFIC_SUMMARY_EVERY,
+  PUBLIC_CORE_MARKETING_PATHS, PUBLIC_ROTATION_MODE, generateAllPaths, getActivePersona,
+  isPublicContentSurfaceEnabled, registerEnhancedPublicRoutes, rotationSeed,
+  startPublicBackgroundTraffic
+});
 
 // Replace the old PUBLIC_CONTENT calls with this
 initEnhancedPublicContent();
@@ -1603,196 +1445,69 @@ const createCoreRoutes = require("../runtime-routes/coreRoutes.js");
   verifyChallengeToken,
   withOptionalUrlPrefix
 }));
-// ================== HEALTH CHECK CONSTANTS ==================
-const HEALTH_INTERVAL_MS = parseMinHourToMs(process.env.HEALTH_INTERVAL ?? "5m", 5 * 60 * 1000);
-const HEALTH_HEARTBEAT_MS = parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h", 2 * 60 * 60 * 1000);
-
-// Event-loop monitor settings are immutable after startup.
-const EVENT_LOOP_LAG_WARN_MS = Math.max(100, parseInt(process.env.EVENT_LOOP_LAG_WARN_MS || "500", 10));
-const EVENT_LOOP_LAG_SAMPLE_MS = Math.max(250, parseInt(process.env.EVENT_LOOP_LAG_SAMPLE_MS || "1000", 10));
-const EVENT_LOOP_FATAL_MS = Math.max(1000, parseInt(process.env.EVENT_LOOP_FATAL_MS || "20000", 10));
-const EVENT_LOOP_FATAL_CONSECUTIVE = Math.max(1, parseInt(process.env.EVENT_LOOP_FATAL_CONSECUTIVE || "3", 10));
-let eventLoopStallConsecutiveHits = 0;
-
-function startEventLoopLagMonitor() {
-  let expected = Date.now() + EVENT_LOOP_LAG_SAMPLE_MS;
-  const interval = setInterval(() => {
-    const now = Date.now();
-    const lag = now - expected;
-    expected = now + EVENT_LOOP_LAG_SAMPLE_MS;
-
-    if (lag > runtimeStats.maxObservedEventLoopLagMs) {
-      runtimeStats.maxObservedEventLoopLagMs = lag;
-      runtimeStats.lastEventLoopLagAt = new Date(now).toISOString();
-    }
-
-    if (lag >= EVENT_LOOP_FATAL_MS) {
-      eventLoopStallConsecutiveHits += 1;
-    } else {
-      eventLoopStallConsecutiveHits = 0;
-    }
-
-    if (lag >= EVENT_LOOP_FATAL_MS && eventLoopStallConsecutiveHits >= EVENT_LOOP_FATAL_CONSECUTIVE) {
-      addLog(`[FATAL] event-loop-stall lag=${Math.round(lag)}ms threshold=${EVENT_LOOP_FATAL_MS}ms hits=${eventLoopStallConsecutiveHits}`);
-      logActiveRequestDiagnostics("event_loop_stall", now);
-      scheduleFatalExit("eventLoopStall", new Error(`event loop lag ${Math.round(lag)}ms >= ${EVENT_LOOP_FATAL_MS}ms for ${eventLoopStallConsecutiveHits} sample(s)`));
-      return;
-    }
-
-    if (lag < EVENT_LOOP_LAG_WARN_MS) return;
-
-    const mem = process.memoryUsage();
-    const rssMb = Math.round((mem.rss / (1024 * 1024)) * 10) / 10;
-    const heapUsedMb = Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10;
-    addLog(`[HEALTH] event-loop-lag=${Math.round(lag)}ms sample=${EVENT_LOOP_LAG_SAMPLE_MS}ms rssMb=${rssMb} heapUsedMb=${heapUsedMb}`);
-  }, EVENT_LOOP_LAG_SAMPLE_MS);
-  return trackIntervalHandle("eventLoopLag", interval);
-}
+// ================== STARTUP & HEALTH CHECKS ==================
+const createHealthRuntime = require("../runtime-lifecycle/healthRuntime.js");
+const {
+  EVENT_LOOP_FATAL_CONSECUTIVE,
+  EVENT_LOOP_FATAL_MS,
+  EVENT_LOOP_LAG_SAMPLE_MS,
+  EVENT_LOOP_LAG_WARN_MS,
+  HEALTH_HEARTBEAT_MS,
+  HEALTH_INTERVAL_MS,
+  checkTurnstileReachable,
+  startEventLoopLagMonitor
+} = createHealthRuntime({
+  TURNSTILE_ORIGIN,
+  _health,
+  addLog,
+  fetchWithTimeout,
+  logActiveRequestDiagnostics,
+  parseMinHourToMs,
+  runtimeStats,
+  scheduleFatalExit: (...args) => scheduleFatalExit(...args),
+  summarizeError,
+  trackIntervalHandle
+});
 
 // ================== STARTUP & HEALTH CHECKS ==================
-function publicContentStartupSummaryLines() {
-  const publicSurfaceEnabled = isPublicContentSurfaceEnabled();
-  const backgroundTrafficEnabled = PUBLIC_ENABLE_BACKGROUND && PUBLIC_CONTENT_SURFACE;
-  const publicForce = String(process.env.PUBLIC_CONTENT_SURFACE_FORCE || '').trim() ? 'set' : 'unset';
-  const publicExplicit = String(process.env.PUBLIC_CONTENT_SURFACE || '').trim() ? 'set' : 'unset';
-  const lines = [
-    `[PUBLIC-CONTENT] Effective enabled=${publicSurfaceEnabled} declared=${PUBLIC_CONTENT_SURFACE} force=${publicForce} explicit=${publicExplicit}`
-  ];
 
-  if (!publicSurfaceEnabled) {
-    lines.push("[PUBLIC-CONTENT] Disabled by safe default (set PUBLIC_CONTENT_SURFACE=1 or PUBLIC_CONTENT_SURFACE_FORCE=1 to enable)");
-    return lines;
-  }
 
-  const persona = getActivePersona();
-  const allPaths = generateAllPaths(persona, rotationSeed());
-  const allPathSet = new Set(allPaths);
-  const missingCore = PUBLIC_CORE_MARKETING_PATHS.filter(path => !allPathSet.has(path));
-  const missingFooter = (persona.footerLinks || [])
-    .map(link => link && link.path)
-    .filter(path => path && path !== '/' && !allPathSet.has(path));
 
-  lines.push(`[PUBLIC-CONTENT] Active persona: ${persona.name} (${persona.sitekey})`);
-  lines.push(`[PUBLIC-CONTENT] Generated ${allPaths.length} unique paths, rotation=${PUBLIC_ROTATION_MODE}`);
-  if (missingCore.length || missingFooter.length) {
-    lines.push(`[PUBLIC-CONTENT] ⚠️ Path coverage gaps core=[${missingCore.join(',') || '-'}] footer=[${missingFooter.join(',') || '-'}]`);
-  }
-  if (backgroundTrafficEnabled) {
-    lines.push(`[PUBLIC-TRAFFIC] Real inbound traffic observer started (persona: ${persona.sitekey})`);
-    lines.push(`[PUBLIC-TRAFFIC] Summary logging every ${PUBLIC_TRAFFIC_SUMMARY_EVERY} visits/errors`);
-  } else {
-    lines.push(`[PUBLIC-TRAFFIC] Real inbound traffic observer disabled (PUBLIC_ENABLE_BACKGROUND=${PUBLIC_ENABLE_BACKGROUND}, PUBLIC_CONTENT_SURFACE=${PUBLIC_CONTENT_SURFACE})`);
-  }
-  return lines;
-}
 
-function startupSummary() {
-  const keyPrints = AES_KEYS.map((k, i) => {
-    const sha = crypto.createHash("sha256").update(k).digest("hex");
-    return `#${i} len=${k.length} sha256=${sha.slice(0,10)}…`;
-  }).join(", ");
-
-  const healthLine = `  • Health: interval=${fmtDurMH(HEALTH_INTERVAL_MS)} heartbeat=${fmtDurMH(HEALTH_HEARTBEAT_MS)}`;
-  const diagLine = `[DIAG] runtime incidents file=${RUNTIME_INCIDENT_FILE} npmDebugDir=${NPM_DEBUG_LOG_DIR}`;
-  const railwayLine = formatRailwayRuntimeLine();
-  const bypassLine = INTERSTITIAL_BYPASS_SECRET
-    ? "[BYPASS] enabled for debug use"
-    : "[BYPASS] disabled (no INTERSTITIAL_BYPASS_SECRET set)";
-
-  return [
-    "🛡️ Security profile",
-    ipinfoLiteStatusLine,
-    `[PROXY] Effective trust proxy setting: ${trustProxyEffective}`,
-    ...getGeoIpFreshnessLines(),
-    `🚀 Server running on port ${PORT}`,
-    `[RUNTIME] bootId=${runtimeStats.bootId} startedAt=${runtimeStats.startedAt}`,
-    `[KEY] Loaded ${AES_KEYS.length} AES key(s): ${keyPrints}`,
-    `  • Time: zone=${zoneLabel()}`,
-    `  • Turnstile: enforceAction=${ENFORCE_ACTION} maxAgeSec=${MAX_TOKEN_AGE_SEC} expectHost=[${EXPECT_HOSTNAME_PATTERNS.map(p => p.allowSubdomains ? `*.${p.suffix}` : p.suffix).join(",")||"-"}]`,
-    `  • Turnstile sitekey=${mask(TURNSTILE_SITEKEY)} secret=${mask(TURNSTILE_SECRET)}`,
-    `  • Geo: allow=[${ALLOWED_COUNTRIES.join(",")||"-"}] block=[${BLOCKED_COUNTRIES.join(",")||"-"}] asn=[${BLOCKED_ASNS.join(",")||"-"}]`,
-    `  • Headless: block=${HEADLESS_BLOCK} hardWeight=${HEADLESS_STRIKE_WEIGHT} softStrike=${HEADLESS_SOFT_STRIKE}`,
-    `  • Scanner impersonation: enabled=${IMPERSONATE_SCANNER} strict=${IMPERSONATE_SCANNER_STRICT} minConfidence=${IMPERSONATE_MIN_CONFIDENCE}`,
-    `  • Scanner compatibility headers: enabled=${SCANNER_COMPAT_HEADERS_ENABLED}`,
-    `  • Unknown scanner shield: enabled=${UNKNOWN_SCANNER_SHIELD_ENABLED} unique=${UNKNOWN_SCANNER_UNIQUE_PATHS}/${UNKNOWN_SCANNER_WINDOW_SECONDS}s rapid=${UNKNOWN_SCANNER_RAPID_UNIQUE_PATHS}/${UNKNOWN_SCANNER_RAPID_WINDOW_SECONDS}s perIpMax=${UNKNOWN_SCANNER_MAX_HISTORY_PER_IP} denyTtl=${UNKNOWN_SCANNER_DENY_TTL_SECONDS}s`,
-    `  • Known scanner deny: keyThreshold=${KNOWN_SCANNER_DENY_THRESHOLD}/${UNKNOWN_SCANNER_WINDOW_SECONDS}s keyDenyTtl=${KNOWN_SCANNER_DENY_TTL_SECONDS}s visibleIpThreshold=${KNOWN_SCANNER_VISIBLE_IP_THRESHOLD}/${UNKNOWN_SCANNER_WINDOW_SECONDS}s visibleIpDenyTtl=${KNOWN_SCANNER_VISIBLE_IP_DENY_TTL_SECONDS}s`,
-    `  • Visible IP reputation: enabled=${VISIBLE_IP_REPUTATION_ENABLED} threshold=${VISIBLE_IP_REPUTATION_DENY_THRESHOLD}/${VISIBLE_IP_REPUTATION_WINDOW_SECONDS}s minCategories=${VISIBLE_IP_REPUTATION_MIN_CATEGORIES} denyTtl=${VISIBLE_IP_REPUTATION_DENY_TTL_SECONDS}s publicWalk=${VISIBLE_IP_PUBLIC_WALK_UNIQUE_PATHS}/${UNKNOWN_SCANNER_WINDOW_SECONDS}s rapid=${VISIBLE_IP_PUBLIC_WALK_RAPID_UNIQUE_PATHS}/${UNKNOWN_SCANNER_RAPID_WINDOW_SECONDS}s`,
-    `  • Crawler public-walk throttle: enabled=${CRAWLER_PUBLIC_WALK_THROTTLE_ENABLED} maxUnique=${CRAWLER_PUBLIC_WALK_MAX_PATHS}/${CRAWLER_PUBLIC_WALK_WINDOW_SECONDS}s searchMax=${CRAWLER_PUBLIC_WALK_SEARCH_MAX_PATHS}/${CRAWLER_PUBLIC_WALK_WINDOW_SECONDS}s cooldown=${CRAWLER_PUBLIC_WALK_COOLDOWN_SECONDS}s`,
-    `  • Interstitial reason header: enabled=${INTERSTITIAL_REASON_HEADER_ENABLED}`,
-    `  • Edge checks: requireCfHeaders=${REQUIRE_CF_HEADERS} trustUpstreamGeoHeaders=${TRUST_UPSTREAM_GEO_HEADERS}`,
-    `  • Rate limits: fixedWindow=${RATE_LIMIT_MAX_REQUESTS}/${RATE_LIMIT_WINDOW_SECONDS}s tokenBucket=${RATE_CAPACITY}/${RATE_WINDOW_SECONDS}s`,
-    `  • Bans: ttl=${BAN_TTL_SEC}s threshold=${BAN_AFTER_STRIKES} hpWeight=${STRIKE_WEIGHT_HP}`,
-    `  • Allowlist patterns=[${ALLOWLIST_DOMAINS.map(p => p.allowSubdomains ? `*.${p.suffix}` : p.suffix).join(",")||"-"}]`,
-    `  • Optional URL prefix: ${OPTIONAL_URL_PREFIX || "disabled"}`,
-    `  • Redirect payload limits: payload=${MAX_REDIRECT_PAYLOAD_LENGTH} totalPath=${MAX_REDIRECT_URL_PATH_LENGTH} mode=${REDIRECT_PAYLOAD_OVERSIZE_MODE} bruteMaxPath=${MAX_BRUTE_SPLIT_PAYLOAD_LENGTH}`,
-    `  • Challenge security: rateLimit=5/5min tokens=10min`,
-    `  • Geo fallback active=${IPINFO_LITE_ENABLED ? "ipinfo-lite" : "headers-only"}`,
-    healthLine,
-    `  • Server timeouts: request=${REQUEST_TIMEOUT_MS}ms keepAlive=${SERVER_KEEP_ALIVE_TIMEOUT_MS}ms headers=${SERVER_HEADERS_TIMEOUT_MS}ms maxRequestsPerSocket=${SERVER_MAX_REQUESTS_PER_SOCKET}`,
-    `  • File logging: enabled=${LOG_TO_FILE} rotation=${LOG_TO_FILE} file=${LOG_FILE} maxBytes=${LOG_FILE_MAX_BYTES} archives=${LOG_FILE_MAX_FILES}`,
-    `  • Event loop monitor: sample=${EVENT_LOOP_LAG_SAMPLE_MS}ms warn=${EVENT_LOOP_LAG_WARN_MS}ms fatal=${EVENT_LOOP_FATAL_MS}ms hits=${EVENT_LOOP_FATAL_CONSECUTIVE}`,
-    ...publicContentStartupSummaryLines(),
-    bypassLine,
-    diagLine,
-    railwayLine
-  ].join("\n");
-}
-
-async function checkTurnstileReachable() {
-  if (_health.inflight) return;
-  _health.inflight = true;
-
-  const now = Date.now();
-  const startedAtMs = Date.now();
-  runtimeStats.turnstileChecks += 1;
-  runtimeStats.lastTurnstileCheckAt = new Date(startedAtMs).toISOString();
-
-  try {
-    const url = `${TURNSTILE_ORIGIN}/turnstile/v0/api.js`;
-    const r = await fetchWithTimeout(url, { method: "HEAD" }, process.env.TURNSTILE_HEALTH_TIMEOUT_MS || 5000);
-    const ok = r.ok;
-    runtimeStats.lastTurnstileLatencyMs = Date.now() - startedAtMs;
-    runtimeStats.lastTurnstileError = null;
-
-    if (ok) { _health.okStreak++; _health.failStreak = 0; }
-    else    { _health.failStreak++; _health.okStreak  = 0; }
-
-    if (_health.ok !== ok) {
-      addLog(`[HEALTH] turnstile HEAD ${r.status} ${ok ? "ok" : "not-ok"} (change)`);
-      _health.ok = ok;
-      _health.lastHeartbeat = now;
-    } else if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
-      addLog(`[HEALTH] heartbeat status=${ok ? "ok" : "not-ok"} okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
-      _health.lastHeartbeat = now;
-    }
-  } catch (e) {
-    runtimeStats.turnstileCheckErrors += 1;
-    const errSummary = summarizeError(e);
-    runtimeStats.lastTurnstileLatencyMs = Date.now() - startedAtMs;
-    runtimeStats.lastTurnstileError = {
-      at: new Date().toISOString(),
-      message: errSummary
-    };
-
-    if (errSummary && /timeout|aborted|aborterror/i.test(errSummary)) {
-      runtimeStats.turnstileCheckTimeouts += 1;
-    }
-
-    _health.failStreak++; _health.okStreak = 0;
-    if (_health.ok !== false) {
-      addLog(`[HEALTH] turnstile HEAD error ${String(e)} (change)`);
-      _health.ok = false;
-      _health.lastHeartbeat = now;
-    } else if (now - _health.lastHeartbeat >= HEALTH_HEARTBEAT_MS) {
-      addLog(`[HEALTH] heartbeat status=not-ok okStreak=${_health.okStreak} failStreak=${_health.failStreak}`);
-      _health.lastHeartbeat = now;
-    }
-  } finally {
-    _health.inflight = false;
-  }
-}
 
 const PORT = process.env.PORT || 8080;
+const createStartupSummary = require("../runtime-lifecycle/startupSummary.js");
+const { startupSummary } = createStartupSummary({
+  AES_KEYS, ALLOWED_COUNTRIES, ALLOWLIST_DOMAINS, BAN_AFTER_STRIKES, BAN_TTL_SEC,
+  BLOCKED_ASNS, BLOCKED_COUNTRIES, CRAWLER_PUBLIC_WALK_COOLDOWN_SECONDS,
+  CRAWLER_PUBLIC_WALK_MAX_PATHS, CRAWLER_PUBLIC_WALK_SEARCH_MAX_PATHS,
+  CRAWLER_PUBLIC_WALK_THROTTLE_ENABLED, CRAWLER_PUBLIC_WALK_WINDOW_SECONDS,
+  ENFORCE_ACTION, EVENT_LOOP_FATAL_CONSECUTIVE, EVENT_LOOP_FATAL_MS,
+  EVENT_LOOP_LAG_SAMPLE_MS, EVENT_LOOP_LAG_WARN_MS, EXPECT_HOSTNAME_PATTERNS,
+  HEADLESS_BLOCK, HEADLESS_SOFT_STRIKE, HEADLESS_STRIKE_WEIGHT, HEALTH_HEARTBEAT_MS,
+  HEALTH_INTERVAL_MS, IMPERSONATE_MIN_CONFIDENCE, IMPERSONATE_SCANNER,
+  IMPERSONATE_SCANNER_STRICT, INTERSTITIAL_BYPASS_SECRET,
+  INTERSTITIAL_REASON_HEADER_ENABLED, IPINFO_LITE_ENABLED, KNOWN_SCANNER_DENY_THRESHOLD,
+  KNOWN_SCANNER_DENY_TTL_SECONDS, KNOWN_SCANNER_VISIBLE_IP_DENY_TTL_SECONDS,
+  KNOWN_SCANNER_VISIBLE_IP_THRESHOLD, LOG_FILE, LOG_FILE_MAX_BYTES, LOG_FILE_MAX_FILES,
+  LOG_TO_FILE, MAX_BRUTE_SPLIT_PAYLOAD_LENGTH, MAX_REDIRECT_PAYLOAD_LENGTH,
+  MAX_REDIRECT_URL_PATH_LENGTH, MAX_TOKEN_AGE_SEC, NPM_DEBUG_LOG_DIR,
+  OPTIONAL_URL_PREFIX, PORT, RATE_CAPACITY, RATE_LIMIT_MAX_REQUESTS,
+  RATE_LIMIT_WINDOW_SECONDS, RATE_WINDOW_SECONDS, REDIRECT_PAYLOAD_OVERSIZE_MODE,
+  REQUEST_TIMEOUT_MS, REQUIRE_CF_HEADERS, RUNTIME_INCIDENT_FILE,
+  SCANNER_COMPAT_HEADERS_ENABLED, SERVER_HEADERS_TIMEOUT_MS, SERVER_KEEP_ALIVE_TIMEOUT_MS,
+  SERVER_MAX_REQUESTS_PER_SOCKET, STRIKE_WEIGHT_HP, TRUST_UPSTREAM_GEO_HEADERS,
+  TURNSTILE_SECRET, TURNSTILE_SITEKEY, UNKNOWN_SCANNER_DENY_TTL_SECONDS,
+  UNKNOWN_SCANNER_MAX_HISTORY_PER_IP, UNKNOWN_SCANNER_RAPID_UNIQUE_PATHS,
+  UNKNOWN_SCANNER_RAPID_WINDOW_SECONDS, UNKNOWN_SCANNER_SHIELD_ENABLED,
+  UNKNOWN_SCANNER_UNIQUE_PATHS, UNKNOWN_SCANNER_WINDOW_SECONDS,
+  VISIBLE_IP_PUBLIC_WALK_RAPID_UNIQUE_PATHS, VISIBLE_IP_PUBLIC_WALK_UNIQUE_PATHS,
+  VISIBLE_IP_REPUTATION_DENY_THRESHOLD, VISIBLE_IP_REPUTATION_DENY_TTL_SECONDS,
+  VISIBLE_IP_REPUTATION_ENABLED, VISIBLE_IP_REPUTATION_MIN_CATEGORIES,
+  VISIBLE_IP_REPUTATION_WINDOW_SECONDS, crypto, fmtDurMH, formatRailwayRuntimeLine,
+  getGeoIpFreshnessLines, ipinfoLiteStatusLine, mask, publicContentStartupSummaryLines,
+  runtimeStats, trustProxyEffective, zoneLabel
+});
 const server = app.listen(PORT, async () => {
   await loadScannerPatterns();
 
@@ -1954,94 +1669,14 @@ process.on("warning", (warning) => {
   addLog(`[PROCESS] warning name=${safeLogValue(warning && warning.name ? warning.name : "Warning", 80)} msg=${safeLogValue(summarizeError(warning && warning.message ? warning.message : warning), 180)}`);
 });
 
-let fatalExitScheduled = false;
-function scheduleFatalExit(origin, details) {
-  if (fatalExitScheduled) return;
-  fatalExitScheduled = true;
-
-  const summary = safeLogValue(summarizeError(details), 180);
-  const correlation = formatRuntimeCorrelationSuffix();
-  recordRuntimeIncident("fatal", { origin, summary, correlation: getRuntimeCorrelationMetadata() });
-  addLog(`[FATAL] ${safeLogValue(origin, 64)} scheduling process exit ${correlation} summary=${summary}`);
-
-  setImmediate(() => {
-    process.exitCode = 1;
-    process.exit(1);
-  });
-}
-
-let isShuttingDown = false;
-let forcedShutdownTimedOut = false;
-async function gracefulShutdown(signal) {
-  runtimeStats.shutdownSignals += 1;
-
-  if (isShuttingDown) {
-    const correlation = formatRuntimeCorrelationSuffix();
-    recordRuntimeIncident("shutdown_signal_while_closing", { signal, correlation: getRuntimeCorrelationMetadata() });
-    addLog(`[SHUTDOWN] Received additional ${signal} while already closing (${correlation}); waiting for existing graceful shutdown`);
-    return;
-  }
-
-  isShuttingDown = true;
-
-  const uptimeSec = Math.round(process.uptime());
-  const mem = process.memoryUsage();
-  const rssMb = Math.round((mem.rss / (1024 * 1024)) * 100) / 100;
-  const trackedInFlight = activeTrackedRequests.size;
-  const correlation = formatRuntimeCorrelationSuffix();
-  const activeRequestSnapshot = buildActiveRequestDiagnostics();
-  recordRuntimeIncident("shutdown", {
-    signal,
-    source: "external_signal",
-    note: "SIGTERM/SIGINT is delivered by the process supervisor, container runtime, npm parent, or user; it is not thrown by application code.",
-    graceMs: SHUTDOWN_GRACE_MS,
-    rssMb,
-    trackedInFlight,
-    activeRequests: activeRequestSnapshot,
-    process: getProcessRuntimeMetadata(),
-    correlation: getRuntimeCorrelationMetadata()
-  });
-  addLog(`[SHUTDOWN] Received ${signal} from external supervisor/runtime; closing server (${correlation} grace=${SHUTDOWN_GRACE_MS}ms uptimeSec=${uptimeSec} rssMb=${rssMb} trackedInFlight=${trackedInFlight} pid=${process.pid} ppid=${process.ppid})`);
-  if (trackedInFlight > 0) logActiveRequestDiagnostics("shutdown");
-
-  clearBackgroundTasks();
-  activeTrackedRequests.clear();
-  runtimeStats.inFlightRequests = 0;
-
-  // End SSE log listeners before waiting on server.close(); long-lived streams can
-  // otherwise keep the server open indefinitely and force timeout exits.
-  for (const listenerRes of LOG_LISTENERS) {
-    try { listenerRes.end(); } catch {}
-  }
-
-  const forceExitTimer = setTimeout(async () => {
-    forcedShutdownTimedOut = true;
-    recordRuntimeIncident("shutdown_forced", { signal, graceMs: SHUTDOWN_GRACE_MS, openSockets: openSockets.size, correlation: getRuntimeCorrelationMetadata() });
-    addLog(`[SHUTDOWN] force exit after grace timeout (${correlation} grace=${SHUTDOWN_GRACE_MS}ms)`);
-    for (const socket of openSockets) {
-      try { socket.destroy(); } catch {}
-    }
-    await closeLogFileWriter(Math.min(2000, SHUTDOWN_GRACE_MS));
-    process.exit(1);
-  }, SHUTDOWN_GRACE_MS);
-
-  server.close(async () => {
-    clearTimeout(forceExitTimer);
-
-    if (forcedShutdownTimedOut) {
-      addLog(`[SHUTDOWN] server closed after grace timeout; preserving forced exit status (${correlation})`);
-      return;
-    }
-
-    addLog(`[SHUTDOWN] server closed cleanly (${correlation})`);
-    await closeLogFileWriter(Math.min(2000, SHUTDOWN_GRACE_MS));
-    process.exit(0);
-  });
-
-  if (typeof server.closeIdleConnections === "function") {
-    try { server.closeIdleConnections(); } catch {}
-  }
-}
+const createProcessLifecycle = require("../runtime-lifecycle/processLifecycle.js");
+const { gracefulShutdown, scheduleFatalExit } = createProcessLifecycle({
+  LOG_LISTENERS, SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
+  buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter,
+  formatRuntimeCorrelationSuffix, getProcessRuntimeMetadata,
+  getRuntimeCorrelationMetadata, logActiveRequestDiagnostics, openSockets,
+  recordRuntimeIncident, runtimeStats, safeLogValue, server, summarizeError
+});
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
