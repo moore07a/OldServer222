@@ -611,8 +611,19 @@ function runtimeRequestTracker(req, res, next) {
   attachRequestTimeoutEnforcement(req, res);
   next();
 }
+function normalizePathPreservingEmbeddedUrls(pathValue) {
+  const raw = String(pathValue || "");
+  if (!raw) return raw;
+  if (!/https?:\/\//i.test(raw)) return raw.replace(/\/{2,}/g, "/");
+  // If an embedded absolute URL is present in the path payload, avoid
+  // slash-collapsing entirely so destination semantics are preserved
+  // (e.g. https://example.com//asset must remain unchanged).
+  return raw;
+}
+
 
   return {
+    normalizePathPreservingEmbeddedUrls,
     attachRequestId,
     startRuntimeRequestTracking,
     createRuntimeRequestFinalizer,

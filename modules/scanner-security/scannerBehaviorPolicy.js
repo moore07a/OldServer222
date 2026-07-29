@@ -719,8 +719,30 @@ function getKnownScannerDenyKey(identity = {}) {
 }
 
 
+async function verifyClaimedSearchBotMiddleware(req, _res, next) {
+  const vendor = getClaimedSearchBotVendor(req);
+  if (!vendor) return next();
+  try {
+    const result = await verifySearchBotIp(getClientIp(req), vendor);
+    req.searchBotVerification = result;
+    const shouldLog = aggregatePerIpEvent("BOT-VERIFY", {
+      ip: getClientIp(req),
+      reason: `${vendor}_${result.verified ? "verified" : result.reason || "failed"}`,
+      suppressFirst: false
+    });
+    if (shouldLog) {
+      addLog(`[BOT-VERIFY] vendor=${safeLogValue(vendor, 16)} verified=${result.verified ? "1" : "0"} reason=${safeLogValue(result.reason || "unknown", 80)} ip=${safeLogValue(getClientIp(req), 64)} host=${safeLogValue(result.hostname || "-", 120)}`);
+    }
+  } catch (error) {
+    req.searchBotVerification = { vendor, verified: false, reason: "middleware_error" };
+    addLog(`[BOT-VERIFY] vendor=${safeLogValue(vendor, 16)} verified=0 reason=middleware_error ip=${safeLogValue(getClientIp(req), 64)} err=${safeLogValue(error && error.message ? error.message : "unknown", 120)}`);
+  }
+  return next();
+}
+
 
   return {
+    verifyClaimedSearchBotMiddleware,
     recordKnownScannerBurstInHistory,
     recordKnownScannerProbeBurst,
     recordKnownScannerVisibleIpBurst,
