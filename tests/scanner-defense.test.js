@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadScannerDefenseHelpers(env = {}) {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('const SCANNER_PROBE_EXACT_PATHS = new Set([');
   const end = source.indexOf('\nconst backgroundTaskHandles = {', start);
   if (start < 0 || end < 0 || end <= start) {
@@ -549,7 +549,7 @@ test('crawler public-walk throttle respects trusted external scanner exemptions'
 });
 
 test('crawler public-walk middleware allowance is honored before unknown-scanner classification', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const throttleIndex = source.indexOf('const crawlerWalk = checkCrawlerPublicWalkThrottle(req);');
   const allowanceIndex = source.indexOf('if (crawlerWalk.publicWalkAllowed) return next();', throttleIndex);
   const unknownScannerIndex = source.indexOf('const unknownScanner = classifyUnknownScannerBehavior(req);', throttleIndex);
@@ -561,7 +561,7 @@ test('crawler public-walk middleware allowance is honored before unknown-scanner
 });
 
 test('crawler public-walk middleware records ops friction before early 429', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const limitedIndex = source.indexOf('if (crawlerWalk.limited) {');
   const reasonIndex = source.indexOf('"scanner_block_reason_crawler_public_walk"', limitedIndex);
   const statusIndex = source.indexOf('"status_429"', limitedIndex);
@@ -1066,7 +1066,7 @@ test('visible IP public-walk history follows visible IP across rotating deny-cac
 });
 
 test('quiet static probe routes are registered before redirect validation', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const validationIndex = source.indexOf('app.use(validateRedirectRequest);');
   assert.notEqual(validationIndex, -1);
 
@@ -1096,7 +1096,7 @@ test('quiet static probe routes are registered before redirect validation', () =
 });
 
 test('baseline security headers are attached before scanner early exits', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const baselineMiddlewareIndex = source.indexOf('applyEarlyBaselineSecurityHeaders(req, res);');
   const scannerProbeBlockerIndex = source.indexOf('// Change 1: Scanner probe blocker');
   const unknownScannerShieldIndex = source.indexOf('// Adaptive shield for unknown scanners');
@@ -1128,7 +1128,7 @@ test('baseline security headers are attached before scanner early exits', () => 
 });
 
 test('scanner safety lane is shared by email-safe and catch-all redirect paths', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
 
   assert.match(source, /function setInterstitialReasonHeader\(res, reason\)/);
   assert.match(source, /function sendScannerSafetyLaneHeadResponse\(req, res, payloadPath, reason = "HEAD-probe"/);
@@ -1153,7 +1153,7 @@ test('scanner safety lane is shared by email-safe and catch-all redirect paths',
 });
 
 test('HEAD safety-lane responses set explicit head-probe reason headers', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const helperStart = source.indexOf('function sendScannerSafetyLaneHeadResponse');
   assert.notEqual(helperStart, -1);
   const helperEnd = source.indexOf('async function tryRenderTrustedScannerSafeHtmlForPayload', helperStart);

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadParseMinHourToMs() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('function parseMinHourToMs(');
   const end = source.indexOf('\n\nfunction fmtDurMH', start);
   if (start < 0 || end < 0 || end <= start) {
