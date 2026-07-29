@@ -1,0 +1,5 @@
+[[redirects]]
+  from = "/*"
+  to = "https://YOUR_BACKEND_HOST/:splat"
+  status = 200
+  force = true

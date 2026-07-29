@@ -1,0 +1,363 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Live Logs (Desktop)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg:#090c12;
+    --panel:#101622cc;
+    --panel-solid:#101622;
+    --text:#e7ecf6;
+    --muted:#9aa6c0;
+    --border:#22304a;
+    --accent:#59b2ff;
+    --ok:#2ad08f;
+    --warn:#ffcc66;
+    --danger:#ff7a7a;
+    --shadow:0 14px 35px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 500px at 10% -20%, #1f3d6759, transparent 70%),
+      radial-gradient(900px 400px at 90% -15%, #3d2a5c5c, transparent 65%),
+      var(--bg);
+    color:var(--text);
+    font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;
+  }
+  .bar{
+    position:fixed; top:0; left:0; right:0; z-index:10;
+    display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;
+    background:var(--panel); backdrop-filter: blur(8px);
+    border-bottom:1px solid var(--border);
+    box-shadow:var(--shadow);
+    padding:.6rem .85rem; color:var(--muted);
+  }
+  .bar strong{color:var(--text); letter-spacing:.2px}
+  .row{display:flex; gap:.5rem; align-items:center; flex-wrap:wrap}
+  .bar input[type="text"], .bar input[type="password"]{
+    background:#0b111dcc; color:var(--text); border:1px solid var(--border);
+    padding:.35rem .5rem; border-radius:6px; min-width:220px;
+  }
+  .bar input::placeholder{color:#7988a7}
+  .bar input:focus{outline:none;border-color:#3d5f8f;box-shadow:0 0 0 3px #2e4f7a55}
+  .bar button{
+    background:#0b111dcc; color:var(--text); border:1px solid var(--border);
+    padding:.35rem .6rem; border-radius:6px; cursor:pointer;
+    transition:.15s ease transform, .15s ease background, .15s ease border-color;
+  }
+  .bar button:hover{transform:translateY(-1px);background:#11192acc;border-color:#34507a}
+  .bar button.primary{
+    border-color:#2f63a0;
+    background:linear-gradient(180deg,#17355a,#142b46);
+    color:#dff1ff
+  }
+  .bar .status{
+    min-width:140px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    padding:.15rem .5rem;
+    display:inline-flex;
+    justify-content:center;
+    font-size:12px;
+    color:#c7d2e8;
+    background:#0b111dcc;
+  }
+  .bar .status[data-state="connected"]{border-color:#2d6a55;color:#baf7de;background:#12352bcc}
+  .bar .status[data-state="reconnecting"]{border-color:#6f5831;color:#ffe3b2;background:#362b1dcc}
+  .bar .status[data-state="paused"]{border-color:#5a4c73;color:#ddd0ff;background:#261f38cc}
+  .bar .status[data-state="error"]{border-color:#7b3737;color:#ffc4c4;background:#351f1fcc}
+  .bar .meta{
+    font-size:12px;
+    background:#0b111dcc;
+    border:1px solid var(--border);
+    border-radius:999px;
+    padding:.15rem .55rem;
+  }
+  .fill{flex:1}
+  .sp{height:78px}
+  pre#out{
+    white-space:pre-wrap; word-wrap:break-word; margin:0;
+    padding:1rem 1rem 1.25rem;
+    height:calc(100% - 78px); overflow:auto;
+    line-height:1.55;
+    border-top:1px solid #1a2333;
+    background:linear-gradient(180deg,#0a101bcc,#090d16cc);
+  }
+  .wrap-toggle{display:inline-flex; gap:.25rem; align-items:center}
+  .footer-hint{
+    position:fixed;
+    right:10px;
+    bottom:8px;
+    color:#8292b4;
+    font-size:11px;
+    background:#0b111dcc;
+    border:1px solid var(--border);
+    padding:.2rem .45rem;
+    border-radius:999px;
+  }
+</style>
+
+<div class="bar">
+  <div class="row">
+    <strong>Live Logs</strong>
+    <span class="status" id="status" data-state="idle">(idle)</span>
+    <span id="meta" class="meta">0 shown</span>
+    <span id="lastEvent" class="meta">last: -</span>
+  </div>
+  <div class="fill"></div>
+
+  <div class="row">
+    <input id="base" type="text" placeholder="Server base (https://your-app.railway.app)" />
+    <input id="token" type="password" placeholder="Admin token" />
+    <input id="filter" type="text" placeholder="Filter text or /regex/i" />
+    <button id="qfInterstitial1">interstitial=1</button>
+    <button id="qfInterstitial0">interstitial=0</button>
+    <button id="qfScanner">[SCANNER]</button>
+    <button id="qfValidation">[VALIDATION-FAILED]</button>
+    <button id="connectBtn" class="primary">Connect</button>
+    <button id="refreshBtn">Refresh</button>
+    <button id="disconnectBtn">Disconnect</button>
+  </div>
+
+  <div class="row">
+    <label class="wrap-toggle"><input id="autoscroll" type="checkbox" checked /> autoscroll</label>
+    <label class="wrap-toggle"><input id="wrap" type="checkbox" checked /> wrap</label>
+    <button id="pauseBtn">Pause</button>
+    <button id="clearBtn">Clear</button>
+    <button id="copyBtn">Copy</button>
+    <button id="saveBtn">Save</button>
+  </div>
+</div>
+
+<div class="sp"></div>
+<pre id="out">Connect to start streaming…</pre>
+<div class="footer-hint">Tip: filter supports plain text or /regex/flags</div>
+
+<script>
+(() => {
+  const MAX_LINES = 5000;
+  const MAX_PAUSED_EVENTS = 2000;
+  const OUT = document.getElementById('out');
+  const STATUS = document.getElementById('status');
+  const META = document.getElementById('meta');
+  const LAST_EVENT = document.getElementById('lastEvent');
+
+  const baseEl = document.getElementById('base');
+  const tokenEl = document.getElementById('token');
+  const filterEl = document.getElementById('filter');
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const qfInterstitial1 = document.getElementById('qfInterstitial1');
+  const qfInterstitial0 = document.getElementById('qfInterstitial0');
+  const qfScanner = document.getElementById('qfScanner');
+  const qfValidation = document.getElementById('qfValidation');
+  const autoscrollEl = document.getElementById('autoscroll');
+  const wrapEl = document.getElementById('wrap');
+
+  let es = null;
+  let paused = false;
+  let dropped = 0;
+  let pausedBuffered = 0;
+  let pausedDropped = 0;
+  const pausedQueue = [];
+  const lines = [];
+
+  function setStatus(text) {
+    STATUS.textContent = `(${text})`;
+    const state = String(text || '').toLowerCase();
+    if (state.includes('connected')) STATUS.dataset.state = 'connected';
+    else if (state.includes('paused')) STATUS.dataset.state = 'paused';
+    else if (state.includes('error')) STATUS.dataset.state = 'error';
+    else if (state.includes('reconnect') || state.includes('connecting')) STATUS.dataset.state = 'reconnecting';
+    else STATUS.dataset.state = 'idle';
+  }
+
+  function parseFilter(raw) {
+    if (!raw) return null;
+    if (raw.startsWith('/')) {
+      const last = raw.lastIndexOf('/');
+      if (last > 1) {
+        try {
+          return new RegExp(raw.slice(1, last), raw.slice(last + 1));
+        } catch {}
+      }
+    }
+    return raw.toLowerCase();
+  }
+
+  function getVisibleLines() {
+    const filter = parseFilter(filterEl.value.trim());
+    if (!filter) return lines;
+    if (filter instanceof RegExp) return lines.filter((line) => filter.test(line));
+    return lines.filter((line) => line.toLowerCase().includes(filter));
+  }
+
+  function render() {
+    const atBottom = OUT.scrollTop + OUT.clientHeight >= OUT.scrollHeight - 2;
+    const visible = getVisibleLines();
+    OUT.textContent = visible.join('\n');
+    const pausedMsg = pausedBuffered > 0 ? ` • +${pausedBuffered} while paused${pausedDropped > 0 ? ` (${pausedDropped} skipped)` : ''}` : '';
+    META.textContent = dropped > 0
+      ? `${visible.length} shown • ${lines.length} kept • ${dropped} dropped${pausedMsg}`
+      : `${visible.length} shown • ${lines.length} kept${pausedMsg}`;
+    if (autoscrollEl.checked && atBottom) OUT.scrollTop = OUT.scrollHeight;
+  }
+
+  function clearOut() {
+    lines.length = 0;
+    dropped = 0;
+    pausedQueue.length = 0;
+    pausedDropped = 0;
+    OUT.textContent = '';
+    render();
+  }
+
+  function pushLine(line) {
+    if (!line) return;
+    // Normalize real and escaped newline variants.
+    // Handles: \n, \\n, \r\n, \\r\\n
+    let expanded = String(line)
+      .replace(/\\\\r\\\\n/g, '\n')
+      .replace(/\\\\n/g, '\n')
+      .replace(/\\r\\n/g, '\n')
+      .replace(/\\n/g, '\n')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+    // Some payloads can arrive with repeated escaping (e.g. "\\\\n").
+    // Apply one more normalization pass if needed.
+    if (expanded.includes('\\n') || expanded.includes('\\r\\n')) {
+      expanded = expanded.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n');
+    }
+    // If backend concatenates entries without delimiters, split before timestamp-like prefixes.
+    expanded = expanded.replace(
+      /(?!^)(\[\d{2}-\d{2}-\d{4}\s-\s\d{2}:\d{2}:\d{2}\s(?:AM|PM)\])/g,
+      '\n$1'
+    );
+    const parts = expanded.split('\n').filter((part) => part.length > 0);
+    if (parts.length === 0) return;
+    lines.push(...parts);
+    if (lines.length > MAX_LINES) {
+      dropped += (lines.length - MAX_LINES);
+      lines.splice(0, lines.length - MAX_LINES);
+    }
+  }
+
+  function connect(base, token) {
+    disconnect(true);
+    if (!base) { setStatus('missing base'); return; }
+    setStatus('connecting…');
+    const url = `${base.replace(/\/+$/, '')}/stream-log?token=${encodeURIComponent(token || '')}`;
+    es = new EventSource(url);
+    es.onopen = () => setStatus('connected');
+    es.addEventListener('reset', () => {
+      clearOut();
+      setStatus('repainting…');
+    });
+    es.onmessage = (e) => {
+      LAST_EVENT.textContent = `last: ${new Date().toLocaleTimeString()}`;
+      if (paused) {
+        if (pausedQueue.length >= MAX_PAUSED_EVENTS) {
+          pausedQueue.shift();
+          pausedDropped += 1;
+        }
+        pausedQueue.push(e.data);
+        pausedBuffered += 1;
+        META.textContent = `${getVisibleLines().length} shown • ${lines.length} kept • +${pausedBuffered} while paused${pausedDropped > 0 ? ` (${pausedDropped} skipped)` : ""}`;
+        return;
+      }
+      pushLine(e.data);
+      render();
+    };
+    es.onerror = () => setStatus(es && es.readyState === 1 ? 'error' : 'reconnecting…');
+  }
+
+  function disconnect(silent = false) {
+    if (es) {
+      try { es.close(); } catch {}
+      es = null;
+    }
+    if (!silent) setStatus('disconnected');
+  }
+
+  function copyAll() {
+    navigator.clipboard.writeText(OUT.textContent || '')
+      .then(() => setStatus('copied'))
+      .catch(() => setStatus('copy failed'));
+  }
+
+  function saveAll() {
+    const blob = new Blob([OUT.textContent || ''], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `live-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 0);
+  }
+
+
+  function applyQuickFilter(value) {
+    filterEl.value = value;
+    render();
+  }
+
+  connectBtn.addEventListener('click', () => {
+    const base = baseEl.value.trim();
+    const token = tokenEl.value;
+    localStorage.setItem('sse_base', base);
+    sessionStorage.setItem('sse_token', token);
+    connect(base, token);
+  });
+
+  refreshBtn.addEventListener('click', () => {
+    clearOut();
+    connect(baseEl.value.trim(), tokenEl.value);
+  });
+  disconnectBtn.addEventListener('click', () => disconnect(false));
+
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused;
+    if (!paused) {
+      for (const queuedLine of pausedQueue) pushLine(queuedLine);
+      pausedQueue.length = 0;
+      pausedBuffered = 0;
+      pausedDropped = 0;
+    }
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    setStatus(paused ? 'paused' : (es ? 'connected' : 'idle'));
+    render();
+  });
+  clearBtn.addEventListener('click', clearOut);
+  copyBtn.addEventListener('click', copyAll);
+  saveBtn.addEventListener('click', saveAll);
+  qfInterstitial1.addEventListener('click', () => applyQuickFilter('interstitial=1'));
+  qfInterstitial0.addEventListener('click', () => applyQuickFilter('interstitial=0'));
+  qfScanner.addEventListener('click', () => applyQuickFilter('[SCANNER]'));
+  qfValidation.addEventListener('click', () => applyQuickFilter('[VALIDATION-FAILED]'));
+  filterEl.addEventListener('input', render);
+  autoscrollEl.addEventListener('change', () => {
+    if (autoscrollEl.checked) OUT.scrollTop = OUT.scrollHeight;
+  });
+  wrapEl.addEventListener('change', () => {
+    OUT.style.whiteSpace = wrapEl.checked ? 'pre-wrap' : 'pre';
+  });
+
+  const params = new URLSearchParams(location.search);
+  const urlBase = params.get('base');
+  const urlToken = params.get('token');
+  baseEl.value = urlBase || localStorage.getItem('sse_base') || '';
+  tokenEl.value = urlToken || sessionStorage.getItem('sse_token') || '';
+  setStatus('ready');
+})();
+</script>
