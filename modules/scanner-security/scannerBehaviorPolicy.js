@@ -5,7 +5,7 @@ module.exports = function createScannerBehaviorPolicy(dependencies) {
     SEARCH_BOT_DNS_CACHE_MAX_ENTRIES, SEARCH_BOT_DNS_CACHE_TTL_MS,
     SEARCH_BOT_DNS_NEGATIVE_TTL_MS, SEARCH_BOT_DNS_TIMEOUT_MS,
     SEARCH_BOT_DNS_VERIFY_ENABLED, addDenyCache, addLog, aggregatePerIpEvent,
-    boundedMapSet, classifyScannerDetectionSource, detectScanner, detectScannerEnhanced, dns, getClientIp,
+    boundedMapSet, detectScannerEnhanced, dns, getClientIp,
     getCurrentPublicPathSet, getDenyCacheIp, getRequestIdentity,
     isLikelyFlexibleRedirectPayloadCandidate, isLikelyRawUrlRedirectPayload,
     isLikelyRedirectPayloadPathCandidate, isPublicContentSurfaceEnabled,
@@ -684,8 +684,48 @@ function isLikelyLocaleOnlyProbePath(pathValue) {
   return LOCALE_ONLY_PROBE_PATH_REGEX.test(normalizedPayloadPath);
 }
 
+function recordKnownScannerBurstInHistory(history, ip, threshold, now = Date.now()) {
+  const key = sanitizeIpForKey(ip || "unknown");
+  if (!key || key === "unknown") return { shouldDeny: false, count: 0 };
+
+  const windowMs = Math.max(1, UNKNOWN_SCANNER_WINDOW_SECONDS) * 1000;
+  const st = history.get(key);
+  if (!st || now - st.windowStart >= windowMs) {
+    boundedMapSet(history, key, { count: 1, windowStart: now }, KNOWN_SCANNER_BURST_HISTORY_MAX_ENTRIES);
+    return { shouldDeny: false, count: 1 };
+  }
+
+  st.count += 1;
+  boundedMapSet(history, key, st, KNOWN_SCANNER_BURST_HISTORY_MAX_ENTRIES);
+  return { shouldDeny: st.count >= threshold, count: st.count };
+}
+
+function recordKnownScannerProbeBurst(ip, now = Date.now()) {
+  return recordKnownScannerBurstInHistory(KNOWN_SCANNER_BURST_HISTORY, ip, KNOWN_SCANNER_DENY_THRESHOLD, now);
+}
+
+function recordKnownScannerVisibleIpBurst(ip, now = Date.now()) {
+  return recordKnownScannerBurstInHistory(KNOWN_SCANNER_VISIBLE_IP_BURST_HISTORY, ip, KNOWN_SCANNER_VISIBLE_IP_THRESHOLD, now);
+}
+
+function shouldTrackVisibleIpKnownScannerBurst(category) {
+  return ["archive_probe", "config_probe", "nested_probe", "prefix_probe", "script_probe", "traversal_probe"].includes(category);
+}
+
+function getKnownScannerDenyKey(identity = {}) {
+  if (identity.source && identity.source !== "client") return null;
+  const key = identity.ip || identity.displayIp || identity.rateLimitKey || identity.denyCacheKey || identity.keyIp;
+  return key && key !== "unknown" ? key : null;
+}
+
+
 
   return {
+    recordKnownScannerBurstInHistory,
+    recordKnownScannerProbeBurst,
+    recordKnownScannerVisibleIpBurst,
+    shouldTrackVisibleIpKnownScannerBurst,
+    getKnownScannerDenyKey,
     VISIBLE_IP_REPUTATION_WEIGHTS,
     VISIBLE_IP_REPUTATION_HIGH_SIGNAL_CATEGORIES,
     getVisibleIpReputationHistoryByKey,

@@ -7,12 +7,15 @@ const vm = require('node:vm');
 
 function loadScannerDefenseHelpers(env = {}) {
   const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const matchingSource = fs.readFileSync('modules/scanner-security/scannerProbeMatching.js', 'utf8');
   const policySource = fs.readFileSync('modules/scanner-security/scannerBehaviorPolicy.js', 'utf8');
   const start = source.indexOf('const SCANNER_PROBE_EXACT_PATHS = new Set([');
-  const end = source.indexOf('\nconst createScannerBehaviorPolicy =', start);
+  const end = source.indexOf('\nconst SCANNER_OPTIONAL_URL_PREFIX =', start);
+  const matchingStart = matchingSource.indexOf('function decodePathForScannerMatching(');
+  const matchingEnd = matchingSource.lastIndexOf('\n  return {');
   const policyStart = policySource.indexOf('const VISIBLE_IP_REPUTATION_WEIGHTS =');
   const policyEnd = policySource.lastIndexOf('\n  return {');
-  if (start < 0 || end < 0 || policyStart < 0 || policyEnd < 0 || end <= start || policyEnd <= policyStart) {
+  if (start < 0 || end < 0 || matchingStart < 0 || matchingEnd < 0 || policyStart < 0 || policyEnd < 0 || end <= start || matchingEnd <= matchingStart || policyEnd <= policyStart) {
     throw new Error('Could not locate scanner defense helper region in server.js');
   }
 
@@ -105,6 +108,7 @@ function loadScannerDefenseHelpers(env = {}) {
         cleanPath.startsWith('/foo' + normalizedBase + '/');
     }
     ${source.slice(start, end)}
+    ${matchingSource.slice(matchingStart, matchingEnd)}
     ${policySource.slice(policyStart, policyEnd)}
     this.__loaded = {
       sanitizeIpForKey,
