@@ -1101,8 +1101,9 @@ test('quiet static probe routes are registered before redirect validation', () =
 
 test('baseline security headers are attached before scanner early exits', () => {
   const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
   const scannerSource = fs.readFileSync('modules/scanner-security/scannerDetection.js', 'utf8');
-  const source = `${runtimeSource}\n${scannerSource}`;
+  const source = `${requestSource}\n${runtimeSource}\n${scannerSource}`;
   const baselineMiddlewareIndex = source.indexOf('applyEarlyBaselineSecurityHeaders(req, res);');
   const scannerProbeBlockerIndex = source.indexOf('// Change 1: Scanner probe blocker');
   const unknownScannerShieldIndex = source.indexOf('// Adaptive shield for unknown scanners');

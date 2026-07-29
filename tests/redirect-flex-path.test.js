@@ -10,6 +10,7 @@ const path = require('node:path');
 
 function loadFunctionsFromServer() {
   const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
   const securitySource = fs.readFileSync('modules/security-runtime/securityRuntime.js', 'utf8');
   const payloadSource = fs.readFileSync('modules/redirect-payload/redirectPayload.js', 'utf8');
   const start = payloadSource.indexOf('function safeLogValue(');
@@ -19,8 +20,8 @@ function loadFunctionsFromServer() {
   if (start < 0 || payloadEnd < 0 || cryptoStart < 0 || end < 0 || payloadEnd <= start || end <= cryptoStart) {
     throw new Error('Could not locate expected redirect payload and runtime function regions');
   }
-  const sanitizeStart = source.indexOf('function sanitizeRequestPath(');
-  const sanitizeEnd = source.indexOf('\nfunction getEventTimestamp(', sanitizeStart);
+  const sanitizeStart = requestSource.indexOf('function sanitizeRequestPath(');
+  const sanitizeEnd = requestSource.indexOf('\nfunction getEventTimestamp(', sanitizeStart);
   if (sanitizeStart < 0 || sanitizeEnd < 0 || sanitizeEnd <= sanitizeStart) {
     throw new Error('Could not locate sanitizeRequestPath in server runtime');
   }
@@ -37,7 +38,7 @@ function loadFunctionsFromServer() {
     const RE_SCANNER_PATH = /^$/;
     const RE_B64URL_SEGMENT = /^[A-Za-z0-9_-]+=*$/;
     const ALLOWLIST_DOMAINS = [{ suffix: 'cdn.example.com', includeApex: true, allowSubdomains: false }];
-    ${source.slice(sanitizeStart, sanitizeEnd)}
+    ${requestSource.slice(sanitizeStart, sanitizeEnd)}
     ${payloadSource.slice(start, payloadEnd)}
     ${securitySource.slice(cryptoStart, end)}
     this.__loaded = { parseRedirectPayload, validateBase64Url, safeLogValue, sanitizeRequestPath, decodeEmailPart, isLikelyEmail, extractSingleCleanEmailToken, bruteSplitDecryptFull, hasBruteSplitRecoverySuffix, getBruteSplitCandidatePrefixLengths, testKeyHex: '${testKeyHex}', vmProcess: process };
