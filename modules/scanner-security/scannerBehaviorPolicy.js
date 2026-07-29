@@ -5,12 +5,23 @@ module.exports = function createScannerBehaviorPolicy(dependencies) {
     SEARCH_BOT_DNS_CACHE_MAX_ENTRIES, SEARCH_BOT_DNS_CACHE_TTL_MS,
     SEARCH_BOT_DNS_NEGATIVE_TTL_MS, SEARCH_BOT_DNS_TIMEOUT_MS,
     SEARCH_BOT_DNS_VERIFY_ENABLED, addDenyCache, addLog, aggregatePerIpEvent,
-    boundedMapSet, classifyScannerDetectionSource, detectScanner, dns, getClientIp,
+    boundedMapSet, classifyScannerDetectionSource, detectScanner, detectScannerEnhanced, dns, getClientIp,
     getCurrentPublicPathSet, getDenyCacheIp, getRequestIdentity,
+    isLikelyFlexibleRedirectPayloadCandidate, isLikelyRawUrlRedirectPayload,
     isLikelyRedirectPayloadPathCandidate, isPublicContentSurfaceEnabled,
     matchesConfiguredScannerProfile, net, pathMatchesUnknownScannerSkipPrefix, pathMatchesWithOptionalPrefix,
     readPositiveIntEnv, safeLogValue, sanitizeIpForKey, stripOptionalUrlPrefix
   } = dependencies;
+  const PUBLIC_CANONICAL_ALIASES = {
+    has(value) {
+      return dependencies.getPublicCanonicalAliases().has(value);
+    }
+  };
+  const IMPERSONATE_MIN_CONFIDENCE = {
+    valueOf() {
+      return dependencies.getImpersonateMinConfidence();
+    }
+  };
 const VISIBLE_IP_REPUTATION_WEIGHTS = {
   scanner_probe: 5,
   unknown_scanner: 6,
