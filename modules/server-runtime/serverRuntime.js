@@ -396,6 +396,12 @@ const {
 });
 const createRequestRuntime = require("../request-runtime/requestRuntime.js");
 const {
+  attachRequestId,
+  startRuntimeRequestTracking,
+  createRuntimeRequestFinalizer,
+  attachRuntimeCompletionLogging,
+  attachRequestTimeoutEnforcement,
+  runtimeRequestTracker,
   SANITIZATION_MAX_LENGTH,
   UA_TRUNCATE_LENGTH,
   PATH_TRUNCATE_LENGTH,
@@ -449,9 +455,12 @@ const {
   addLog: (...args) => addLog(...args),
   classifyScannerProbeCandidate, crypto, decodePathForScannerMatching,
   decodeB64urlLoose: (...args) => decodeB64urlLoose(...args), express,
+  formatRequestIdentityLogSuffix: (...args) => formatRequestIdentityLogSuffix(...args),
   getClientIp: (...args) => getClientIp(...args),
   getConfiguredEmailDelimiters: (...args) => getConfiguredEmailDelimiters(...args),
+  getRequestIdentity: (...args) => getRequestIdentity(...args),
   isLikelyEmail: (...args) => isLikelyEmail(...args), isScannerExactProbePath,
+  markTimeoutAndMaybeBrownout: (...args) => markTimeoutAndMaybeBrownout(...args),
   normalizeScannerProbeCandidate, os,
   parseRedirectPayload: (...args) => parseRedirectPayload(...args),
   pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args),
@@ -459,8 +468,6 @@ const {
   safeLogValue: (...args) => safeLogValue(...args),
   stripOptionalUrlPrefix: (...args) => stripOptionalUrlPrefix(...args)
 });
-
-let nextTrackedRequestId = 1;
 
 const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
 const FORWARDER_AUTH_HEADER = "x-mds-forwarder-auth";
@@ -723,104 +730,6 @@ app.use((req, res, next) => {
 app.use(runtimeRequestTracker);
 
 // ------------ Enhanced Global Security Headers ---------------
-function attachRequestId(req, res) {
-  const requestId = resolveOrCreateRequestId(req);
-  req.requestId = requestId;
-  res.setHeader("x-request-id", requestId);
-  return requestId;
-}
-
-function startRuntimeRequestTracking(req, requestId, requestStartedAtMs) {
-  if (!shouldTrackRuntimeRequest(req)) return { tracked: false, trackedRequestId: null };
-  const trackedRequestId = nextTrackedRequestId++;
-  runtimeStats.totalRequests += 1;
-  const identity = getRequestIdentity(req);
-  const requestPath = sanitizeRequestPath(req.originalUrl || req.url || req.path || "-");
-  activeTrackedRequests.set(trackedRequestId, {
-    startedAtMs: requestStartedAtMs,
-    requestId,
-    method: String(req.method || "GET").toUpperCase(),
-    path: requestPath,
-    ip: identity.ip,
-    keyIp: identity.keyIp
-  });
-  runtimeStats.inFlightRequests = getTrackedInFlightCount();
-  runtimeStats.lastRequestStartedAt = new Date(requestStartedAtMs).toISOString();
-  runtimeStats.lastRequestPath = requestPath;
-  return { tracked: true, trackedRequestId };
-}
-
-function createRuntimeRequestFinalizer(trackingState, requestStartedAtMs) {
-  let requestAccounted = false;
-  return function finalizeTrackedRequest() {
-    if (!trackingState.tracked || requestAccounted) return false;
-    requestAccounted = true;
-    activeTrackedRequests.delete(trackingState.trackedRequestId);
-    runtimeStats.inFlightRequests = getTrackedInFlightCount();
-    const durationMs = Date.now() - requestStartedAtMs;
-    if (durationMs > runtimeStats.maxObservedRequestDurationMs) {
-      runtimeStats.maxObservedRequestDurationMs = durationMs;
-    }
-    return true;
-  };
-}
-
-function attachRuntimeCompletionLogging(req, res, requestId, requestStartedAtMs, finalizeTrackedRequest) {
-  const recordRequestCompletion = () => {
-    if (!finalizeTrackedRequest()) return;
-    const durationMs = Date.now() - requestStartedAtMs;
-    runtimeStats.completedRequests += 1;
-    runtimeStats.lastRequestCompletedAt = new Date().toISOString();
-    runtimeStats.lastResponseStatus = res.statusCode;
-    const identity = getRequestIdentity(req);
-    addLog(`[REQ:finish] id=${safeLogValue(requestId, 120)} ip=${safeLogValue(identity.ip, 64)}${formatRequestIdentityLogSuffix(req)} method=${safeLogValue(req.method, 12)} path=${safeLogValue(sanitizeRequestPath(req.originalUrl || req.url || req.path || "-"), 180)} status=${res.statusCode} durationMs=${durationMs}`);
-  };
-
-  const recordRequestAbort = () => {
-    if (!finalizeTrackedRequest()) return;
-    const durationMs = Date.now() - requestStartedAtMs;
-    runtimeStats.abortedRequests += 1;
-    const identity = getRequestIdentity(req);
-    addLog(`[REQ:close] id=${safeLogValue(requestId, 120)} ip=${safeLogValue(identity.ip, 64)}${formatRequestIdentityLogSuffix(req)} method=${safeLogValue(req.method, 12)} path=${safeLogValue(sanitizeRequestPath(req.originalUrl || req.url || req.path || "-"), 180)} status=${res.statusCode || "-"} durationMs=${durationMs}`);
-  };
-
-  res.on("finish", recordRequestCompletion);
-  res.on("close", recordRequestAbort);
-  res.on("error", recordRequestAbort);
-  req.on("aborted", recordRequestAbort);
-}
-
-function attachRequestTimeoutEnforcement(req, res) {
-  if (!shouldEnforceRequestTimeout(req)) return;
-  req.setTimeout(REQUEST_TIMEOUT_MS);
-  res.setTimeout(REQUEST_TIMEOUT_MS);
-  req.on("timeout", () => {
-    runtimeStats.requestTimeouts += 1;
-    markTimeoutAndMaybeBrownout();
-    const identity = getRequestIdentity(req);
-    const keySuffix = identity.keyIp && identity.keyIp !== identity.ip ? ` keyIp=${safeLogValue(identity.keyIp, 64)}` : "";
-    addLog(`[TIMEOUT] request timeout ip=${safeLogValue(identity.ip, 64)}${keySuffix} method=${safeLogValue(req.method, 12)} path=${safeLogValue(req.path, 120)} timeoutMs=${REQUEST_TIMEOUT_MS}`);
-
-    if (!res.headersSent) {
-      res.status(408).json({ ok: false, error: "request_timeout" });
-      return;
-    }
-
-    try {
-      req.destroy();
-    } catch (_) {}
-  });
-}
-
-function runtimeRequestTracker(req, res, next) {
-  const requestStartedAtMs = Date.now();
-  const requestId = attachRequestId(req, res);
-  const trackingState = startRuntimeRequestTracking(req, requestId, requestStartedAtMs);
-  const finalizeTrackedRequest = createRuntimeRequestFinalizer(trackingState, requestStartedAtMs);
-  attachRuntimeCompletionLogging(req, res, requestId, requestStartedAtMs, finalizeTrackedRequest);
-  attachRequestTimeoutEnforcement(req, res);
-  next();
-}
 app.use((req, res, next) => {
   // Generate a nonce for CSP
   const cspNonce = crypto.randomBytes(16).toString('base64');
