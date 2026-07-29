@@ -11,7 +11,7 @@ const path = require('node:path');
 function loadFunctionsFromServer() {
   const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('function safeLogValue(');
-  const end = source.indexOf('// ================== LOGGING SYSTEM');
+  const end = source.indexOf('const createLogging = require(');
   if (start < 0 || end < 0 || end <= start) {
     throw new Error('Could not locate expected function region in server.js');
   }

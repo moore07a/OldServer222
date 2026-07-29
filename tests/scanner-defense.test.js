@@ -1096,7 +1096,9 @@ test('quiet static probe routes are registered before redirect validation', () =
 });
 
 test('baseline security headers are attached before scanner early exits', () => {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const scannerSource = fs.readFileSync('modules/scanner-security/scannerDetection.js', 'utf8');
+  const source = `${runtimeSource}\n${scannerSource}`;
   const baselineMiddlewareIndex = source.indexOf('applyEarlyBaselineSecurityHeaders(req, res);');
   const scannerProbeBlockerIndex = source.indexOf('// Change 1: Scanner probe blocker');
   const unknownScannerShieldIndex = source.indexOf('// Adaptive shield for unknown scanners');
@@ -1128,7 +1130,10 @@ test('baseline security headers are attached before scanner early exits', () => 
 });
 
 test('scanner safety lane is shared by email-safe and catch-all redirect paths', () => {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
+  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
 
   assert.match(source, /function setInterstitialReasonHeader\(res, reason\)/);
   assert.match(source, /function sendScannerSafetyLaneHeadResponse\(req, res, payloadPath, reason = "HEAD-probe"/);
@@ -1153,7 +1158,10 @@ test('scanner safety lane is shared by email-safe and catch-all redirect paths',
 });
 
 test('HEAD safety-lane responses set explicit head-probe reason headers', () => {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
+  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
   const helperStart = source.indexOf('function sendScannerSafetyLaneHeadResponse');
   assert.notEqual(helperStart, -1);
   const helperEnd = source.indexOf('async function tryRenderTrustedScannerSafeHtmlForPayload', helperStart);

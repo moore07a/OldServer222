@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadLogFunctions(maxLogLines) {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const source = fs.readFileSync('modules/logging/logging.js', 'utf8');
   const start = source.indexOf('function appendInMemoryLog(');
-  const end = source.indexOf('// ================== SECURITY & RATE LIMITING', start);
+  const end = source.indexOf('\n\n  return {\n    LOG_TO_FILE', start);
   if (start < 0 || end < 0 || end <= start) {
     throw new Error('Could not locate expected log function region in server.js');
   }
