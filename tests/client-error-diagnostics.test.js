@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadClientErrorHelpers() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
   const start = source.indexOf('function summarizeError(error, maxLen = 220)');
   const end = source.indexOf('\nlet cpuSnapshot = {', start);
   if (start < 0 || end < 0 || end <= start) {

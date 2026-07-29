@@ -7,9 +7,13 @@ const vm = require('node:vm');
 
 function loadScannerDefenseHelpers(env = {}) {
   const source = fs.readFileSync('server.js', 'utf8');
-  const start = source.indexOf('const SCANNER_PROBE_EXACT_PATHS = new Set([');
-  const end = source.indexOf('\nconst backgroundTaskHandles = {', start);
-  if (start < 0 || end < 0 || end <= start) {
+  const matchingSource = fs.readFileSync('modules/scanner-security/scannerProbeMatching.js', 'utf8');
+  const policySource = fs.readFileSync('modules/scanner-security/scannerBehaviorPolicy.js', 'utf8');
+  const matchingStart = matchingSource.indexOf('// Scanner probe path prefixes');
+  const matchingEnd = matchingSource.lastIndexOf('\n  return {');
+  const policyStart = policySource.indexOf('const VISIBLE_IP_REPUTATION_WEIGHTS =');
+  const policyEnd = policySource.lastIndexOf('\n  return {');
+  if (matchingStart < 0 || matchingEnd < 0 || policyStart < 0 || policyEnd < 0 || matchingEnd <= matchingStart || policyEnd <= policyStart) {
     throw new Error('Could not locate scanner defense helper region in server.js');
   }
 
@@ -101,7 +105,8 @@ function loadScannerDefenseHelpers(env = {}) {
         cleanPath === '/foo' + normalizedBase ||
         cleanPath.startsWith('/foo' + normalizedBase + '/');
     }
-    ${source.slice(start, end)}
+    ${matchingSource.slice(matchingStart, matchingEnd)}
+    ${policySource.slice(policyStart, policyEnd)}
     this.__loaded = {
       sanitizeIpForKey,
       classifyScannerProbeCandidate,
@@ -1096,7 +1101,10 @@ test('quiet static probe routes are registered before redirect validation', () =
 });
 
 test('baseline security headers are attached before scanner early exits', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
+  const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
+  const scannerSource = fs.readFileSync('modules/scanner-security/scannerDetection.js', 'utf8');
+  const source = `${requestSource}\n${runtimeSource}\n${scannerSource}`;
   const baselineMiddlewareIndex = source.indexOf('applyEarlyBaselineSecurityHeaders(req, res);');
   const scannerProbeBlockerIndex = source.indexOf('// Change 1: Scanner probe blocker');
   const unknownScannerShieldIndex = source.indexOf('// Adaptive shield for unknown scanners');
@@ -1128,7 +1136,10 @@ test('baseline security headers are attached before scanner early exits', () => 
 });
 
 test('scanner safety lane is shared by email-safe and catch-all redirect paths', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
+  const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
 
   assert.match(source, /function setInterstitialReasonHeader\(res, reason\)/);
   assert.match(source, /function sendScannerSafetyLaneHeadResponse\(req, res, payloadPath, reason = "HEAD-probe"/);
@@ -1153,7 +1164,10 @@ test('scanner safety lane is shared by email-safe and catch-all redirect paths',
 });
 
 test('HEAD safety-lane responses set explicit head-probe reason headers', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
+  const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
   const helperStart = source.indexOf('function sendScannerSafetyLaneHeadResponse');
   assert.notEqual(helperStart, -1);
   const helperEnd = source.indexOf('async function tryRenderTrustedScannerSafeHtmlForPayload', helperStart);

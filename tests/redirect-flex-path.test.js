@@ -5,18 +5,25 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const { createRequire } = require('node:module');
+const path = require('node:path');
 
 function loadFunctionsFromServer() {
   const source = fs.readFileSync('server.js', 'utf8');
-  const start = source.indexOf('function safeLogValue(');
-  const end = source.indexOf('// ================== LOGGING SYSTEM');
-  if (start < 0 || end < 0 || end <= start) {
-    throw new Error('Could not locate expected function region in server.js');
+  const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
+  const securitySource = fs.readFileSync('modules/security-runtime/securityRuntime.js', 'utf8');
+  const payloadSource = fs.readFileSync('modules/redirect-payload/redirectPayload.js', 'utf8');
+  const start = payloadSource.indexOf('function safeLogValue(');
+  const payloadEnd = payloadSource.lastIndexOf('\n  return {');
+  const cryptoStart = securitySource.indexOf('function hasCloudflareHeaders(');
+  const end = securitySource.indexOf('const createLogging = require(');
+  if (start < 0 || payloadEnd < 0 || cryptoStart < 0 || end < 0 || payloadEnd <= start || end <= cryptoStart) {
+    throw new Error('Could not locate expected redirect payload and runtime function regions');
   }
-  const sanitizeStart = source.indexOf('function sanitizeRequestPath(');
-  const sanitizeEnd = source.indexOf('\nfunction getEventTimestamp(', sanitizeStart);
+  const sanitizeStart = requestSource.indexOf('function sanitizeRequestPath(');
+  const sanitizeEnd = requestSource.indexOf('\nfunction getEventTimestamp(', sanitizeStart);
   if (sanitizeStart < 0 || sanitizeEnd < 0 || sanitizeEnd <= sanitizeStart) {
-    throw new Error('Could not locate sanitizeRequestPath in server.js');
+    throw new Error('Could not locate sanitizeRequestPath in server runtime');
   }
 
   const testKeyHex = '0707070707070707070707070707070707070707070707070707070707070707';
@@ -31,17 +38,19 @@ function loadFunctionsFromServer() {
     const RE_SCANNER_PATH = /^$/;
     const RE_B64URL_SEGMENT = /^[A-Za-z0-9_-]+=*$/;
     const ALLOWLIST_DOMAINS = [{ suffix: 'cdn.example.com', includeApex: true, allowSubdomains: false }];
-    ${source.slice(sanitizeStart, sanitizeEnd)}
-    ${source.slice(start, end)}
+    ${requestSource.slice(sanitizeStart, sanitizeEnd)}
+    ${payloadSource.slice(start, payloadEnd)}
+    ${securitySource.slice(cryptoStart, end)}
     this.__loaded = { parseRedirectPayload, validateBase64Url, safeLogValue, sanitizeRequestPath, decodeEmailPart, isLikelyEmail, extractSingleCleanEmailToken, bruteSplitDecryptFull, hasBruteSplitRecoverySuffix, getBruteSplitCandidatePrefixLengths, testKeyHex: '${testKeyHex}', vmProcess: process };
   `;
   const sandboxProcess = { ...process, env: {} };
-  const sandbox = { Buffer, URL, process: sandboxProcess, console, crypto };
+  const serverRequire = createRequire(path.resolve('modules/redirect-payload/redirectPayload.js'));
+  const sandbox = { Buffer, URL, process: sandboxProcess, console, crypto, require: serverRequire };
   vm.createContext(sandbox);
   vm.runInContext(snippet, sandbox);
 
   if (!sandbox.__loaded || typeof sandbox.__loaded.parseRedirectPayload !== 'function' || typeof sandbox.__loaded.validateBase64Url !== 'function' || typeof sandbox.__loaded.safeLogValue !== 'function' || typeof sandbox.__loaded.sanitizeRequestPath !== 'function' || typeof sandbox.__loaded.decodeEmailPart !== 'function' || typeof sandbox.__loaded.isLikelyEmail !== 'function' || typeof sandbox.__loaded.extractSingleCleanEmailToken !== 'function' || typeof sandbox.__loaded.bruteSplitDecryptFull !== 'function') {
-    throw new Error('Failed to load parser/validator functions from server.js');
+    throw new Error('Failed to load parser/validator functions from modules');
   }
 
   return sandbox.__loaded;
