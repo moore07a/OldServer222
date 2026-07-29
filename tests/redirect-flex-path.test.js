@@ -5,11 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const { createRequire } = require('node:module');
+const path = require('node:path');
 
 function loadFunctionsFromServer() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('function safeLogValue(');
-  const end = source.indexOf('// ================== LOGGING SYSTEM');
+  const end = source.indexOf('const createLogging = require(');
   if (start < 0 || end < 0 || end <= start) {
     throw new Error('Could not locate expected function region in server.js');
   }
@@ -36,7 +38,8 @@ function loadFunctionsFromServer() {
     this.__loaded = { parseRedirectPayload, validateBase64Url, safeLogValue, sanitizeRequestPath, decodeEmailPart, isLikelyEmail, extractSingleCleanEmailToken, bruteSplitDecryptFull, hasBruteSplitRecoverySuffix, getBruteSplitCandidatePrefixLengths, testKeyHex: '${testKeyHex}', vmProcess: process };
   `;
   const sandboxProcess = { ...process, env: {} };
-  const sandbox = { Buffer, URL, process: sandboxProcess, console, crypto };
+  const serverRequire = createRequire(path.resolve('modules/server-runtime/serverRuntime.js'));
+  const sandbox = { Buffer, URL, process: sandboxProcess, console, crypto, require: serverRequire };
   vm.createContext(sandbox);
   vm.runInContext(snippet, sandbox);
 

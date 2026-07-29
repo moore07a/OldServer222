@@ -9,7 +9,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function loadRotationHelpers() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/logging/logging.js', 'utf8');
   const start = source.indexOf('function pruneLogArchives(');
   const end = source.indexOf('\nfunction rotateLogFileStream(', start);
   if (start < 0 || end < 0 || end <= start) {
@@ -100,7 +100,7 @@ test('synchronous shutdown flush rotates instead of exceeding the size limit', (
 });
 
 function loadRotateLogFileStream() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/logging/logging.js', 'utf8');
   const start = source.indexOf('function rotateLogFileStream(');
   const end = source.indexOf('\nfunction ensureLogFileStream(', start);
   const calls = [];

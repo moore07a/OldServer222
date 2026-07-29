@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadScannerStatsHelpers() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/scanner-security/scannerDetection.js', 'utf8');
   const start = source.indexOf('function buildOpsScannerStatsForDay(day = utcDayStamp())');
   const end = source.indexOf('\nfunction hashUAForStats', start);
   if (start < 0 || end < 0 || end <= start) {

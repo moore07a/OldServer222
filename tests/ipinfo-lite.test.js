@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadIpinfoHelpers() {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('function normalizeAsn(');
   const end = source.indexOf('\nfunction pruneIpinfoLiteCache', start);
   if (start < 0 || end < 0 || end <= start) {
