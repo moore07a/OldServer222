@@ -10,11 +10,12 @@ const path = require('node:path');
 
 function loadFunctionsFromServer() {
   const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const securitySource = fs.readFileSync('modules/security-runtime/securityRuntime.js', 'utf8');
   const payloadSource = fs.readFileSync('modules/redirect-payload/redirectPayload.js', 'utf8');
   const start = payloadSource.indexOf('function safeLogValue(');
   const payloadEnd = payloadSource.lastIndexOf('\n  return {');
-  const cryptoStart = source.indexOf('function hasCloudflareHeaders(');
-  const end = source.indexOf('const createLogging = require(');
+  const cryptoStart = securitySource.indexOf('function hasCloudflareHeaders(');
+  const end = securitySource.indexOf('const createLogging = require(');
   if (start < 0 || payloadEnd < 0 || cryptoStart < 0 || end < 0 || payloadEnd <= start || end <= cryptoStart) {
     throw new Error('Could not locate expected redirect payload and runtime function regions');
   }
@@ -38,7 +39,7 @@ function loadFunctionsFromServer() {
     const ALLOWLIST_DOMAINS = [{ suffix: 'cdn.example.com', includeApex: true, allowSubdomains: false }];
     ${source.slice(sanitizeStart, sanitizeEnd)}
     ${payloadSource.slice(start, payloadEnd)}
-    ${source.slice(cryptoStart, end)}
+    ${securitySource.slice(cryptoStart, end)}
     this.__loaded = { parseRedirectPayload, validateBase64Url, safeLogValue, sanitizeRequestPath, decodeEmailPart, isLikelyEmail, extractSingleCleanEmailToken, bruteSplitDecryptFull, hasBruteSplitRecoverySuffix, getBruteSplitCandidatePrefixLengths, testKeyHex: '${testKeyHex}', vmProcess: process };
   `;
   const sandboxProcess = { ...process, env: {} };

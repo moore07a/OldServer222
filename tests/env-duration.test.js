@@ -6,16 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadParseMinHourToMs() {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
-  const start = source.indexOf('function parseMinHourToMs(');
-  const end = source.indexOf('\n\nfunction fmtDurMH', start);
-  if (start < 0 || end < 0 || end <= start) {
-    throw new Error('Could not locate parseMinHourToMs in server.js');
-  }
-
-  const sandbox = { module: { exports: {} } };
-  vm.runInNewContext(`${source.slice(start, end)}\nmodule.exports = { parseMinHourToMs };`, sandbox);
-  return sandbox.module.exports.parseMinHourToMs;
+  return require('../modules/runtime-utils/parseMinHourToMs.js');
 }
 
 test('parseMinHourToMs accepts scanner reload seconds, minutes, hours, and milliseconds', () => {
