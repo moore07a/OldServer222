@@ -4,7 +4,8 @@ function createPublicUtilities(dependencies) {
   const {
     PUBLIC_ROTATION_MODE,
     PUBLIC_SITE_BASE_URL,
-    crypto
+    crypto,
+    isLikelyInternalHostname
   } = dependencies;
 
 function dayStamp(d = new Date()) {

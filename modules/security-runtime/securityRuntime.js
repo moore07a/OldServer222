@@ -5,14 +5,22 @@ module.exports = function createSecurityRuntime(dependencies) {
     IN_MEM_BUCKETS_MAX_ENTRIES, IN_MEM_DENY_CACHE_MAX_ENTRIES,
     IN_MEM_STRIKES_MAX_ENTRIES, LOG_AGGREGATION_MAX_ENTRIES,
     MDS_FORWARDER_AUTH_SECRET, PER_IP_REQUEST_COUNTS_MAX_ENTRIES,
-    RE_B64URL_SEGMENT, SCANNER_AGG_ALERT_THRESHOLD, TRUST_CLOUDFLARE_XFF_CHAIN,
-    TRUST_UPSTREAM_GEO_HEADERS, VISIBLE_IP_REPUTATION_WEIGHTS,
+    RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS, RE_B64URL_SEGMENT,
+    SCANNER_AGG_ALERT_THRESHOLD, TRUST_CLOUDFLARE_XFF_CHAIN,
+    TRUST_UPSTREAM_GEO_HEADERS, UNKNOWN_SCANNER_DENY_TTL_SECONDS,
+    VISIBLE_IP_REPUTATION_DENY_TTL_SECONDS, VISIBLE_IP_REPUTATION_WEIGHTS,
+    KNOWN_SCANNER_DENY_TTL_SECONDS, KNOWN_SCANNER_VISIBLE_IP_DENY_TTL_SECONDS,
     boundedMapSet, clampMs, formatLocal, fs, getConfiguredEmailDelimiters,
-    lookupIpinfoLite, maybeEnrichGeoAsync, normalizeAsn, os,
+    getMaxBruteSplitPayloadLength, lookupIpinfoLite, maybeEnrichGeoAsync, normalizeAsn, os,
     parseRedirectPayload, path, readMsEnv, readPositiveIntEnv, runtimeStats,
     safeDecode, safeLogValue, sanitizeOneLine, summarizeError, trustProxyEffective,
     withOptionalUrlPrefix
   } = dependencies;
+  const ALLOWLIST_DOMAINS = {
+    some(callback) {
+      return dependencies.getAllowlistDomains().some(callback);
+    }
+  };
 function hasCloudflareHeaders(req) {
   return Boolean(
     req.headers["cf-connecting-ip"] ||

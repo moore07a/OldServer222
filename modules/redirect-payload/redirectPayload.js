@@ -17,6 +17,7 @@ module.exports = function createRedirectPayload(dependencies) {
     hasInterstitialBypass,
     isLikelyCrawlerProbePath,
     isLikelyEmail,
+    isHostAllowlisted,
     isLikelyLocaleOnlyProbePath,
     isLikelyScannerProbePath,
     maybeDenyForVisibleIpReputation,

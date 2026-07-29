@@ -18,6 +18,7 @@ function createScannerDetection(dependencies) {
     normHost,
     normalizeIpv4Mapped,
     normalizeScannerConfidence,
+    safeLogValue,
     withDnsTimeout
   } = dependencies;
 

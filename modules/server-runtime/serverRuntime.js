@@ -2324,6 +2324,7 @@ const {
   getAllowlistDomains: () => ALLOWLIST_DOMAINS,
   getClientIp: (...args) => getClientIp(...args),
   hasInterstitialBypass: (...args) => hasInterstitialBypass(...args),
+  isHostAllowlisted: (...args) => isHostAllowlisted(...args),
   isLikelyCrawlerProbePath,
   isLikelyEmail: (...args) => isLikelyEmail(...args),
   isLikelyLocaleOnlyProbePath,
@@ -2475,9 +2476,14 @@ const {
   IN_MEM_BUCKETS_MAX_ENTRIES, IN_MEM_DENY_CACHE_MAX_ENTRIES,
   IN_MEM_STRIKES_MAX_ENTRIES, LOG_AGGREGATION_MAX_ENTRIES,
   MDS_FORWARDER_AUTH_SECRET, PER_IP_REQUEST_COUNTS_MAX_ENTRIES,
-  RE_B64URL_SEGMENT, SCANNER_AGG_ALERT_THRESHOLD, TRUST_CLOUDFLARE_XFF_CHAIN,
-  TRUST_UPSTREAM_GEO_HEADERS, VISIBLE_IP_REPUTATION_WEIGHTS, boundedMapSet, clampMs,
-  formatLocal, fs, getConfiguredEmailDelimiters, lookupIpinfoLite, maybeEnrichGeoAsync,
+  KNOWN_SCANNER_DENY_TTL_SECONDS, KNOWN_SCANNER_VISIBLE_IP_DENY_TTL_SECONDS,
+  RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS, RE_B64URL_SEGMENT,
+  SCANNER_AGG_ALERT_THRESHOLD, TRUST_CLOUDFLARE_XFF_CHAIN,
+  TRUST_UPSTREAM_GEO_HEADERS, UNKNOWN_SCANNER_DENY_TTL_SECONDS,
+  VISIBLE_IP_REPUTATION_DENY_TTL_SECONDS, VISIBLE_IP_REPUTATION_WEIGHTS,
+  boundedMapSet, clampMs, formatLocal, fs, getConfiguredEmailDelimiters,
+  getMaxBruteSplitPayloadLength, getAllowlistDomains: () => ALLOWLIST_DOMAINS,
+  lookupIpinfoLite, maybeEnrichGeoAsync,
   normalizeAsn, os, parseRedirectPayload, path, readMsEnv,
   readPositiveIntEnv, runtimeStats, safeDecode, safeLogValue, sanitizeOneLine,
   summarizeError, trustProxyEffective, withOptionalUrlPrefix
@@ -2665,6 +2671,7 @@ const {
   normHost,
   normalizeIpv4Mapped,
   normalizeScannerConfidence,
+  safeLogValue,
   withDnsTimeout
 });
 const createBehavioralDetection = require("../scanner-security/behavioralDetection.js");
@@ -2880,7 +2887,16 @@ const {
 } = createPublicUtilities({
   PUBLIC_ROTATION_MODE: (process.env.PUBLIC_ROTATION_MODE || "daily").trim().toLowerCase(),
   PUBLIC_SITE_BASE_URL: (process.env.TURNSTILE_EXPECT_HOSTNAME || "").trim(),
-  crypto
+  crypto,
+  isLikelyInternalHostname: (hostname) => {
+    const normalized = String(hostname || "").toLowerCase().split(":")[0].trim();
+    if (!normalized) return true;
+    if (normalized === "localhost") return true;
+    if (normalized.endsWith(".local")) return true;
+    if (normalized.endsWith(".internal")) return true;
+    if (normalized.endsWith(".up.railway.app")) return true;
+    return false;
+  }
 });
 
 const createPublicContent = require("../public-content/publicContent.js");
