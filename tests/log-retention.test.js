@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadLogFunctions(maxLogLines) {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const start = source.indexOf('function appendInMemoryLog(');
   const end = source.indexOf('// ================== SECURITY & RATE LIMITING', start);
   if (start < 0 || end < 0 || end <= start) {
