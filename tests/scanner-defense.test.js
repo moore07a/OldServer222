@@ -554,7 +554,7 @@ test('crawler public-walk throttle respects trusted external scanner exemptions'
 });
 
 test('crawler public-walk middleware allowance is honored before unknown-scanner classification', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const throttleIndex = source.indexOf('const crawlerWalk = checkCrawlerPublicWalkThrottle(req);');
   const allowanceIndex = source.indexOf('if (crawlerWalk.publicWalkAllowed) return next();', throttleIndex);
   const unknownScannerIndex = source.indexOf('const unknownScanner = classifyUnknownScannerBehavior(req);', throttleIndex);
@@ -566,7 +566,7 @@ test('crawler public-walk middleware allowance is honored before unknown-scanner
 });
 
 test('crawler public-walk middleware records ops friction before early 429', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const limitedIndex = source.indexOf('if (crawlerWalk.limited) {');
   const reasonIndex = source.indexOf('"scanner_block_reason_crawler_public_walk"', limitedIndex);
   const statusIndex = source.indexOf('"status_429"', limitedIndex);
@@ -1071,7 +1071,7 @@ test('visible IP public-walk history follows visible IP across rotating deny-cac
 });
 
 test('quiet static probe routes are registered before redirect validation', () => {
-  const source = fs.readFileSync('server.js', 'utf8');
+  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
   const validationIndex = source.indexOf('app.use(validateRedirectRequest);');
   assert.notEqual(validationIndex, -1);
 
