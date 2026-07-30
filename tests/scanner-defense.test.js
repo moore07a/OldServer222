@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function loadScannerDefenseHelpers(env = {}) {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const source = fs.readFileSync('server.js', 'utf8');
   const matchingSource = fs.readFileSync('modules/scanner-security/scannerProbeMatching.js', 'utf8');
   const policySource = fs.readFileSync('modules/scanner-security/scannerBehaviorPolicy.js', 'utf8');
   const matchingStart = matchingSource.indexOf('// Scanner probe path prefixes');
@@ -1101,7 +1101,7 @@ test('quiet static probe routes are registered before redirect validation', () =
 });
 
 test('baseline security headers are attached before scanner early exits', () => {
-  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
   const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
   const scannerSource = fs.readFileSync('modules/scanner-security/scannerDetection.js', 'utf8');
   const source = `${requestSource}\n${runtimeSource}\n${scannerSource}`;
@@ -1138,7 +1138,7 @@ test('baseline security headers are attached before scanner early exits', () => 
 test('scanner safety lane is shared by email-safe and catch-all redirect paths', () => {
   const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
   const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
-  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
   const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
 
   assert.match(source, /function setInterstitialReasonHeader\(res, reason\)/);
@@ -1166,7 +1166,7 @@ test('scanner safety lane is shared by email-safe and catch-all redirect paths',
 test('HEAD safety-lane responses set explicit head-probe reason headers', () => {
   const redirectCoreSource = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
   const operationalRoutesSource = fs.readFileSync('modules/runtime-routes/operationalRoutes.js', 'utf8');
-  const runtimeSource = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const runtimeSource = fs.readFileSync('server.js', 'utf8');
   const source = `${redirectCoreSource}\n${operationalRoutesSource}\n${runtimeSource}`;
   const helperStart = source.indexOf('function sendScannerSafetyLaneHeadResponse');
   assert.notEqual(helperStart, -1);

@@ -9,7 +9,7 @@ const { createRequire } = require('node:module');
 const path = require('node:path');
 
 function loadFunctionsFromServer() {
-  const source = fs.readFileSync('modules/server-runtime/serverRuntime.js', 'utf8');
+  const source = fs.readFileSync('server.js', 'utf8');
   const requestSource = fs.readFileSync('modules/request-runtime/requestRuntime.js', 'utf8');
   const securitySource = fs.readFileSync('modules/security-runtime/securityRuntime.js', 'utf8');
   const payloadSource = fs.readFileSync('modules/redirect-payload/redirectPayload.js', 'utf8');
