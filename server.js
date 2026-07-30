@@ -1,4 +1,4 @@
-// AES Redirector v5.0.6 :- Cloudflare Turnstile Hardened + Advance Beta Widget + Interstitial Improved + ScannerHeader Fix + No resource leak
+// AES Redirector v5.0.7 :- Module Cloudflare Turnstile Hardened + Advance Beta Widget + Interstitial Improved + ScannerHeader Fix + No resource leak
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
@@ -91,10 +91,11 @@ const MEMORY_PRESSURE_HEAP_USED_RATIO = Math.min(0.99, Math.max(0.1, Number(proc
 const SCANNER_SAFE_HTML_ENABLED = ["1", "true", "yes", "on"].includes(
   String(process.env.SCANNER_SAFE_HTML_ENABLED || "0").trim().toLowerCase()
 );
+
 const parseMinHourToMs = require("./modules/runtime-utils/parseMinHourToMs.js");
 const eSCANNER_CONFIG_RELOAD_MS = parseMinHourToMs(process.env.eSCANNER_CONFIG_RELOAD_MS, 600000, "ms");
-// -------------------------------------------------
 
+// -------------------------------------------------
 // Per-IP rate limiter (Change 3)
 const RATE_LIMIT_WINDOW_SECONDS = readPositiveIntEnv("RATE_LIMIT_WINDOW_SECONDS", 60);
 const RATE_LIMIT_MAX_REQUESTS = readPositiveIntEnv("RATE_LIMIT_MAX_REQUESTS", 100);
@@ -267,6 +268,7 @@ const {
   sanitizeIpForKey: (...args) => sanitizeIpForKey(...args),
   stripOptionalUrlPrefix: (...args) => stripOptionalUrlPrefix(...args)
 });
+
 const createRequestRuntime = require("./modules/request-runtime/requestRuntime.js");
 const {
   normalizePathPreservingEmbeddedUrls,
@@ -391,9 +393,6 @@ const {
   summarizeError: (...args) => summarizeError(...args)
 });
 
-
-
-
 app.use((req, _res, next) => {
   const rawUrl = String(req.url || "/");
   const qIndex = rawUrl.indexOf("?");
@@ -418,7 +417,6 @@ app.use((req, _res, next) => {
 });
 
 // ================== EARLY-EXIT MIDDLEWARE ==================
-
 app.use(verifyClaimedSearchBotMiddleware);
 
 // Change 1: Scanner probe blocker — runs before any expensive middleware.
@@ -526,6 +524,7 @@ app.use((req, res, next) => {
   }
   // --- ADD THIS LINE RIGHT HERE ---
   addLog(`[UNKNOWN-SCANNER-HEADERS] reason=${unknownScanner.reason} ${safeLogJson(req.headers, 2000)}`);
+  
   // --------------------------------
   const day = utcDayStamp();
   incrementOpsMetric(OPS_METRICS.frictionByDay, day, "scanner_block_total", 1);
@@ -747,7 +746,6 @@ const {
   validationFailureLimiter: (...args) => validationFailureLimiter(...args)
 });
 
-
 const createSecurityRuntime = require("./modules/security-runtime/securityRuntime.js");
 const {
   LOG_TO_FILE,
@@ -900,6 +898,7 @@ const {
   readPositiveIntEnv, runtimeStats, safeDecode, safeLogValue, sanitizeOneLine,
   summarizeError, trustProxyEffective, withOptionalUrlPrefix
 });
+
 // ================== SECURITY POLICY FUNCTIONS ==================
 const ALLOWED_COUNTRIES = (process.env.ALLOWED_COUNTRIES || "").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
 const BLOCKED_COUNTRIES = (process.env.BLOCKED_COUNTRIES || "").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
@@ -990,6 +989,7 @@ const {
   safeLogValue,
   withDnsTimeout
 });
+
 const createBehavioralDetection = require("./modules/scanner-security/behavioralDetection.js");
 const {
   BEHAVIORAL_CONFIG,
@@ -1043,6 +1043,7 @@ const {
   normalizeTurnstileEnv,
   safeLogValue
 });
+
 // ================== RATE LIMITERS ==================
 const limitChallengeView = makeIpLimiter({
   capacity: parseInt(process.env.CHALLENGE_VIEW_CAPACITY || "5", 10),
@@ -1054,7 +1055,6 @@ const limitChallenge   = makeIpLimiter({ capacity: parseInt(process.env.CHALLENG
 const limitTsClientLog = makeIpLimiter({ capacity: parseInt(process.env.TSLOG_CAPACITY || "30",10),      windowSec: parseInt(process.env.TSLOG_WINDOW_SEC || "300",10),      keyPrefix: "tslog" });
 const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAUTH_CAPACITY || "10",10), windowSec: parseInt(process.env.SSE_UNAUTH_WINDOW_SEC || "60",10),  keyPrefix: "sse_unauth" });
 const validationFailureLimiter = makeIpLimiter({ capacity: 10, windowSec: 300, keyPrefix: "validation_fail" });
-
 
 const {
   adminHits,
@@ -1171,13 +1171,11 @@ const {
   verifyTurnstileToken,
   withOptionalUrlPrefix
 });
+
 // ================== MIDDLEWARE SETUP ==================
 app.use(cors());
 app.use(express.json({ limit: "64kb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
-
-
-
 
 app.use(["/view-log", "/__debug", "/admin"], (req, res, next) => {
   if (isAdmin(req) || isAdminSSE(req)) return next();
@@ -1243,8 +1241,8 @@ const {
   rotationSeed,
   safeLogValue
 });
-// ================== INITIALIZATION ==================
 
+// ================== INITIALIZATION ==================
 const createPublicStartup = require("./modules/public-content/publicStartup.js");
 const { initEnhancedPublicContent, publicContentStartupSummaryLines } = createPublicStartup({
   PUBLIC_CONTENT_SURFACE, PUBLIC_ENABLE_BACKGROUND, PUBLIC_TRAFFIC_SUMMARY_EVERY,
@@ -1449,6 +1447,7 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   verifyChallengeToken,
   withOptionalUrlPrefix
 }));
+
 // ================== STARTUP & HEALTH CHECKS ==================
 const createHealthRuntime = require("./modules/runtime-lifecycle/healthRuntime.js");
 const {
@@ -1474,11 +1473,6 @@ const {
 });
 
 // ================== STARTUP & HEALTH CHECKS ==================
-
-
-
-
-
 const PORT = process.env.PORT || 8080;
 const createStartupSummary = require("./modules/runtime-lifecycle/startupSummary.js");
 const { startupSummary } = createStartupSummary({
@@ -1512,6 +1506,7 @@ const { startupSummary } = createStartupSummary({
   getGeoIpFreshnessLines, ipinfoLiteStatusLine, mask, publicContentStartupSummaryLines,
   runtimeStats, trustProxyEffective, zoneLabel
 });
+
 const server = app.listen(PORT, async () => {
   await loadScannerPatterns();
 
@@ -1614,6 +1609,7 @@ server.on("clientError", (error, socket) => {
     remoteAddress: socket && socket.remoteAddress ? String(socket.remoteAddress) : null,
     remotePort: socket && socket.remotePort ? Number(socket.remotePort) : null
   };
+  
   const shouldLogClientError = isNoisyClientAbortParseError(error)
     ? aggregatePerIpEvent("SERVER-CLIENT-ERROR", {
         ip: getClientErrorAggregateIp(socket),
