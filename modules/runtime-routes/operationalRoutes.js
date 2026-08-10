@@ -94,6 +94,10 @@ function createOperationalRoutes(dependencies) {
     resolvePublicBaseUrls
   } = dependencies;
 
+const asyncHandler = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
+
 // ================== PUBLIC CONTENT HELPERS ==================
 
 
@@ -716,9 +720,9 @@ const handleEmailSafePath = async (req, res) => {
   });
 };
 
-app.get("/e/:data(*)", handleEmailSafePath);
+app.get("/e/:data(*)", asyncHandler(handleEmailSafePath));
 if (OPTIONAL_URL_PREFIX) {
-  app.get(withOptionalUrlPrefix("/e/:data(*)"), handleEmailSafePath);
+  app.get(withOptionalUrlPrefix("/e/:data(*)"), asyncHandler(handleEmailSafePath));
 }
 
 const handleEmailSafePathHead = (req, res) => {
@@ -743,13 +747,13 @@ const handleRRoute = async (req, res) => {
   return handleRedirectCore(req, res, baseString);
 };
 
-app.get("/r", handleRRoute);
+app.get("/r", asyncHandler(handleRRoute));
 if (OPTIONAL_URL_PREFIX) {
-  app.get(withOptionalUrlPrefix("/r"), handleRRoute);
+  app.get(withOptionalUrlPrefix("/r"), asyncHandler(handleRRoute));
 }
 
 let activeCatchAllRequests = 0;
-app.get("/:data(*)", async (req, res) => {
+app.get("/:data(*)", asyncHandler(async (req, res) => {
   if (isBrownoutActive()) {
     res.setHeader("Retry-After", "5");
     addLog(`[BROWNOUT] shedding route=catchall ip=${safeLogValue(getClientIp(req), 64)}`);
@@ -789,7 +793,7 @@ app.get("/:data(*)", async (req, res) => {
   } finally {
     done();
   }
-});
+}));
 
 
   return {

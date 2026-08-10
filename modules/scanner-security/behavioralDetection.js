@@ -238,7 +238,7 @@ function detectScannerEnhancedWithBehavior(req) {
 }
 
 function buildScannerInterstitialContext(req, fallbackReason = "Known scanner UA") {
-  const scannerResult = detectScannerEnhancedWithBehavior(req);
+  const scannerResult = getRequestScannerDetection(req);
   if (!scannerResult || !scannerResult.isScanner) {
     return {
       scannerReason: fallbackReason,
@@ -276,10 +276,20 @@ function buildScannerInterstitialContext(req, fallbackReason = "Known scanner UA
   };
 }
 
+function getRequestScannerDetection(req) {
+  if (req && req._scannerBehaviorDetectionResult) return req._scannerBehaviorDetectionResult;
+  const result = detectScannerEnhancedWithBehavior(req);
+  if (req) req._scannerBehaviorDetectionResult = result;
+  return result;
+}
+
 function logScannerHit(req, reason, nextEnc) {
   const ip   = getClientIp(req);
   const ua   = (req.get("user-agent") || "").slice(0, UA_TRUNCATE_LENGTH);
-  const path = (req.originalUrl || req.path || "").slice(0, PATH_TRUNCATE_LENGTH);
+  const requestPath = String(req.path || req.originalUrl || "");
+  const path = nextEnc
+    ? (/^\/e(?:\/|$)/.test(requestPath) ? "/e/[redacted]" : "/[redacted]")
+    : requestPath.slice(0, PATH_TRUNCATE_LENGTH);
   const ref  = (req.get("referer") || req.get("referrer") || "").slice(0, REFERER_TRUNCATE_LENGTH);
   const acc  = (req.get("accept") || "").slice(0, ACCEPT_TRUNCATE_LENGTH);
   const reasonCode = toReasonCode(reason);
@@ -312,6 +322,7 @@ function logScannerHit(req, reason, nextEnc) {
     REQUEST_HISTORY,
     cleanupRequestHistory,
     detectScannerEnhancedWithBehavior,
+    getRequestScannerDetection,
     buildScannerInterstitialContext,
     logScannerHit
   };

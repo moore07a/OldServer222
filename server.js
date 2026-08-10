@@ -996,6 +996,7 @@ const {
   REQUEST_HISTORY,
   cleanupRequestHistory,
   detectScannerEnhancedWithBehavior,
+  getRequestScannerDetection,
   buildScannerInterstitialContext,
   logScannerHit
 } = createBehavioralDetection({
@@ -1121,6 +1122,7 @@ const {
   decodeB64urlLoose,
   decodeEmailPart,
   detectScannerEnhancedWithBehavior,
+  getRequestScannerDetection,
   evaluateRedirectPayloadSize,
   explainDecryptFailure,
   extractEmailSafePayloadPath,
@@ -1167,6 +1169,7 @@ const {
   tryDecryptAny,
   tryDecryptAtKnownDelimiterBoundaries,
   utcDayStamp,
+  validateBase64Url,
   verifyLinkHmac,
   verifyTurnstileToken,
   withOptionalUrlPrefix
