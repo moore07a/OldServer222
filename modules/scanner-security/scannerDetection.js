@@ -341,6 +341,8 @@ function applyScannerSafeHtmlHeaders(res) {
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.setHeader("X-" + "Content-Type-Options", SECURITY_HEADER_VALUES.contentTypeOptions);
   res.setHeader("Referrer-Policy", SECURITY_HEADER_VALUES.referrerPolicy);
+  res.setHeader("X-Frame-Options", SECURITY_HEADER_VALUES.frameOptions || "DENY");
+  res.setHeader("Permissions-Policy", SECURITY_HEADER_VALUES.privacyPermissions || "geolocation=(), microphone=(), camera=()");
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"

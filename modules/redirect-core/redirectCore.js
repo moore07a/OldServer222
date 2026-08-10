@@ -46,6 +46,7 @@ function createRedirectCore(dependencies) {
     decodeB64urlLoose,
     decodeEmailPart,
     detectScannerEnhancedWithBehavior,
+    getRequestScannerDetection,
     evaluateRedirectPayloadSize,
     explainDecryptFailure,
     extractEmailSafePayloadPath,
@@ -92,6 +93,7 @@ function createRedirectCore(dependencies) {
     tryDecryptAny,
     tryDecryptAtKnownDelimiterBoundaries,
     utcDayStamp,
+    validateBase64Url,
     verifyLinkHmac,
     verifyTurnstileToken,
     withOptionalUrlPrefix
@@ -380,7 +382,8 @@ function setInterstitialReasonHeader(res, reason) {
 function logScannerSafetyLane(req, payloadPath, mode, reason, source = "unknown") {
   const ip = getClientIp(req);
   const virtualPath = payloadPath ? "/e/[redacted]" : "/e";
-  addLog(`[SCANNER-SAFETY-LANE] source=${safeLogValue(source, 32)} virtualPath=${virtualPath} mode=${safeLogValue(mode, 48)} reason=${safeLogValue(reason || "-", 80)} ip=${safeLogValue(ip, 64)} method=${safeLogValue(req.method, 12)} originalPath=${safeLogValue(req.originalUrl || req.url || req.path || "", 160)}`);
+  const requestPath = String(source).startsWith("email-safe") ? "/e/[redacted]" : "/[redacted]";
+  addLog(`[SCANNER-SAFETY-LANE] source=${safeLogValue(source, 32)} virtualPath=${virtualPath} mode=${safeLogValue(mode, 48)} reason=${safeLogValue(reason || "-", 80)} ip=${safeLogValue(ip, 64)} method=${safeLogValue(req.method, 12)} originalPath=${requestPath}`);
 }
 
 function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
@@ -471,7 +474,8 @@ app.use((req, res, next) => {
 });
 
 // --- Early short-circuit for HEAD/OPTIONS scanner-style probes on deep links ---
-app.use(async (req, res, next) => {
+app.use((req, res, next) => {
+  Promise.resolve((async () => {
   if (hasInterstitialBypass(req)) return next();
 
   // allow your own health, logs, and challenge endpoints through
@@ -520,16 +524,10 @@ app.use(async (req, res, next) => {
   }
 
   const url = req.originalUrl || "";
-  const looksEncoded = /[A-Za-z0-9+/=_-]{40,}/.test(url);
-  const longPath = url.length > 80;
-  const hasCookies = !!req.headers["cookie"];
-  const fetchMode = (req.get("sec-fetch-mode") || "").toLowerCase();
-  const looksPrefetch = fetchMode && fetchMode !== "navigate" && fetchMode !== "document";
-
-  const looksDeep = longPath && looksEncoded && (!hasCookies || looksPrefetch);
+  const clean = url.replace(/^\//, "").split("?")[0];
+  const looksDeep = validateBase64Url(clean);
 
   if (looksDeep) {
-    const clean = url.replace(/^\//, "").split("?")[0];
     const scannerCtx = buildScannerInterstitialContext(req, req.method + "-probe");
     if (req.method === "HEAD") {
       logScannerHit(req, scannerCtx.scannerReason || "HEAD-probe", clean);
@@ -545,10 +543,12 @@ app.use(async (req, res, next) => {
   }
 
   return next();
+  })()).catch(next);
 });
 
 // --- OPTIONAL: catch GET probes on /e/... and show the safe interstitial ---
-app.use(async (req, res, next) => {
+app.use((req, res, next) => {
+  Promise.resolve((async () => {
   if (hasInterstitialBypass(req)) return next();
 
   // Let your own endpoints through untouched
@@ -585,6 +585,7 @@ app.use(async (req, res, next) => {
   }
 
   return next();
+  })()).catch(next);
 });
 
 function createSecurityPolicyContext(req) {
@@ -635,7 +636,7 @@ function checkIpBanPolicy(req, ctx) {
 
 function checkScannerPolicy(req, ctx) {
   if (ctx.bypassInterstitial) return null;
-  const scannerResult = detectScannerEnhancedWithBehavior(req);
+  const scannerResult = getRequestScannerDetection(req);
   if (!scannerResult.isScanner) return null;
 
   // --- ADD THIS LINE ---
