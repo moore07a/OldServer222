@@ -82,3 +82,14 @@ test("health runtime keeps fatal lag independent from a lower timer cap", () => 
     assert.equal(runtime.EVENT_LOOP_FATAL_MS, 20_000);
   });
 });
+
+test("health runtime keeps warning lag independent from a lower timer cap", () => {
+  withEnv({ EVENT_LOOP_LAG_WARN_MS: undefined }, () => {
+    const cappedReadMsEnv = (_name, fallback, minimum) => {
+      return Math.max(minimum, Math.min(fallback, 200));
+    };
+    const runtime = createRuntime({ readMsEnv: cappedReadMsEnv });
+
+    assert.equal(runtime.EVENT_LOOP_LAG_WARN_MS, 500);
+  });
+});

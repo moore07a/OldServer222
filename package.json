@@ -12,7 +12,7 @@
     "scanner:soak": "node tests/scanner-soak.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.17.0"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",

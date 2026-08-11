@@ -12,10 +12,10 @@ module.exports = function createHealthRuntime(dependencies) {
   const HEALTH_HEARTBEAT_MS = parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h", 2 * 60 * 60 * 1000);
 
   // Event-loop monitor settings are immutable after startup.
-  const EVENT_LOOP_LAG_WARN_MS = readMsEnv("EVENT_LOOP_LAG_WARN_MS", 500, 100);
+  // Warning and fatal thresholds are comparisons, not timer delays, so neither
+  // should inherit the global timer cap.
+  const EVENT_LOOP_LAG_WARN_MS = Math.max(100, readPositiveIntEnv("EVENT_LOOP_LAG_WARN_MS", 500));
   const EVENT_LOOP_LAG_SAMPLE_MS = readMsEnv("EVENT_LOOP_LAG_SAMPLE_MS", 1000, 250);
-  // This is a comparison threshold, not a timer delay. Keep it independent
-  // from MAX_TIMER_MS so a timer cap cannot make fatal-exit detection harsher.
   const EVENT_LOOP_FATAL_MS = Math.max(1000, readPositiveIntEnv("EVENT_LOOP_FATAL_MS", 20000));
   const EVENT_LOOP_FATAL_CONSECUTIVE = readPositiveIntEnv("EVENT_LOOP_FATAL_CONSECUTIVE", 3);
   let eventLoopStallConsecutiveHits = 0;

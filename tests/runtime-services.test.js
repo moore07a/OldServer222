@@ -79,3 +79,47 @@ test("fetchWithTimeout still enforces its own deadline", async () => {
     /fetch timeout after 5ms/
   );
 });
+
+test("fetchWithTimeout keeps caller cancellation active while consuming the body", async () => {
+  let bodySignal;
+  const services = createServices(async (_url, { signal }) => {
+    bodySignal = signal;
+    return {
+      async json() {
+        return new Promise((resolve, reject) => {
+          if (bodySignal.aborted) return reject(bodySignal.reason);
+          bodySignal.addEventListener("abort", () => reject(bodySignal.reason), { once: true });
+        });
+      }
+    };
+  });
+  const caller = new AbortController();
+  const reason = new Error("cancel during body");
+  const response = await services.fetchWithTimeout(
+    "https://example.test",
+    { signal: caller.signal },
+    5_000
+  );
+  const body = response.json();
+
+  caller.abort(reason);
+
+  await assert.rejects(body, (error) => error === reason);
+});
+
+test("fetchWithRuntimeSpan does not count caller cancellation as a dependency failure", async () => {
+  const services = createServices(pendingFetch);
+  const caller = new AbortController();
+  const reason = new DOMException("caller cancelled", "AbortError");
+  const request = services.fetchWithRuntimeSpan(
+    "cancelled_dependency",
+    "https://example.test",
+    { signal: caller.signal },
+    5_000
+  );
+
+  caller.abort(reason);
+
+  await assert.rejects(request, (error) => error === reason);
+  assert.equal(services.dependencyCircuitState.has("cancelled_dependency"), false);
+});
