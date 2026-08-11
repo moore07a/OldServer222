@@ -1469,6 +1469,8 @@ const {
   fetchWithTimeout,
   logActiveRequestDiagnostics,
   parseMinHourToMs,
+  readMsEnv,
+  readPositiveIntEnv,
   runtimeStats,
   scheduleFatalExit: (...args) => scheduleFatalExit(...args),
   summarizeError,

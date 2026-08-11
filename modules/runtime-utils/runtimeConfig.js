@@ -15,14 +15,19 @@ function clampMs(value, minMs = 0, maxMs = MAX_TIMER_MS) {
 }
 
 function readMsEnv(name, defaultMs, minMs = 1000, maxMs = MAX_TIMER_MS) {
+  // A caller's operational minimum must win over a lower global timer cap.
+  // Otherwise a misconfigured MAX_TIMER_MS can turn guarded background loops
+  // into near-zero intervals. The JavaScript timer ceiling remains absolute.
+  const safeMinMs = clampMs(minMs, 0, DEFAULT_MAX_TIMER_MS);
+  const safeMaxMs = clampMs(Math.max(safeMinMs, maxMs), safeMinMs, DEFAULT_MAX_TIMER_MS);
   const raw = process.env[name];
   const normalizedRaw = typeof raw === "string" ? raw.trim() : raw;
   if (normalizedRaw == null || normalizedRaw === "") {
-    return clampMs(defaultMs, minMs, maxMs);
+    return clampMs(defaultMs, safeMinMs, safeMaxMs);
   }
   const parsed = Number(normalizedRaw);
   const safe = Number.isFinite(parsed) ? Math.trunc(parsed) : defaultMs;
-  return clampMs(safe, minMs, maxMs);
+  return clampMs(safe, safeMinMs, safeMaxMs);
 }
 
 function readPositiveIntEnv(name, fallback) {

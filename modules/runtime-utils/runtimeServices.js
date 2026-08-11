@@ -46,17 +46,27 @@ function normalizeTimeoutMs(ms, fallbackMs = FETCH_TIMEOUT_MS_DEFAULT) {
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS_DEFAULT) {
   const controller = new AbortController();
   const timeout = normalizeTimeoutMs(timeoutMs, 8000);
+  const callerSignal = options && options.signal;
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, controller.signal])
+    : controller.signal;
   const timer = setTimeout(() => controller.abort(new Error(`fetch timeout after ${timeout}ms`)), timeout);
 
   try {
     const merged = {
       ...options,
-      signal: controller.signal
+      signal
     };
     return await fetch(url, merged);
   } finally {
     clearTimeout(timer);
   }
+}
+
+function isCallerAbortError(error, signal) {
+  if (!signal || !signal.aborted) return false;
+  if (error === signal.reason) return true;
+  return Boolean(error && error.name === "AbortError");
 }
 
 async function fetchWithRuntimeSpan(spanName, url, options = {}, timeoutMs = FETCH_TIMEOUT_MS_DEFAULT) {
@@ -84,6 +94,10 @@ async function fetchWithRuntimeSpan(spanName, url, options = {}, timeoutMs = FET
     addLog(`[DEP:finish] span=${safeLogValue(spanName, 64)} status=${response.status} durationMs=${Date.now() - started}`);
     return response;
   } catch (err) {
+    if (isCallerAbortError(err, options && options.signal)) {
+      addLog(`[DEP:cancelled] span=${safeLogValue(spanName, 64)} durationMs=${Date.now() - started}`);
+      throw err;
+    }
     const priorFailures = dependencyCircuitState.get(spanName)?.failures || 0;
     const failures = priorFailures + 1;
     const openUntil = failures >= CIRCUIT_BREAKER_THRESHOLD ? Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS : 0;
@@ -236,6 +250,7 @@ function maybeEnrichGeoAsync(ip, resolvedCountry, source) {
     clearBackgroundTasks,
     normalizeTimeoutMs,
     fetchWithTimeout,
+    isCallerAbortError,
     fetchWithRuntimeSpan,
     markTimeoutAndMaybeBrownout,
     isBrownoutActive,
