@@ -24,7 +24,7 @@ function withEnv(values, callback) {
   }
 }
 
-function createRuntime() {
+function createRuntime(overrides = {}) {
   return createHealthRuntime({
     TURNSTILE_ORIGIN: "https://challenges.cloudflare.com",
     _health: { inflight: false, okStreak: 0, failStreak: 0 },
@@ -37,7 +37,8 @@ function createRuntime() {
     runtimeStats: { maxObservedEventLoopLagMs: 0, turnstileChecks: 0 },
     scheduleFatalExit() {},
     summarizeError(error) { return String(error); },
-    trackIntervalHandle(_name, handle) { return handle; }
+    trackIntervalHandle(_name, handle) { return handle; },
+    ...overrides
   });
 }
 
@@ -68,5 +69,16 @@ test("health runtime clamps event-loop settings to operational minimums", () => 
     assert.equal(runtime.EVENT_LOOP_LAG_SAMPLE_MS, 250);
     assert.equal(runtime.EVENT_LOOP_FATAL_MS, 1000);
     assert.equal(runtime.EVENT_LOOP_FATAL_CONSECUTIVE, 4);
+  });
+});
+
+test("health runtime keeps fatal lag independent from a lower timer cap", () => {
+  withEnv({ EVENT_LOOP_FATAL_MS: undefined }, () => {
+    const cappedReadMsEnv = (_name, fallback, minimum) => {
+      return Math.max(minimum, Math.min(fallback, 5_000));
+    };
+    const runtime = createRuntime({ readMsEnv: cappedReadMsEnv });
+
+    assert.equal(runtime.EVENT_LOOP_FATAL_MS, 20_000);
   });
 });
