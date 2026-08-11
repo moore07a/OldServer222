@@ -46,6 +46,16 @@ function normalizeTimeoutMs(ms, fallbackMs = FETCH_TIMEOUT_MS_DEFAULT) {
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS_DEFAULT) {
   const controller = new AbortController();
   const timeout = normalizeTimeoutMs(timeoutMs, 8000);
+  const callerSignal = options && options.signal;
+  const forwardCallerAbort = () => {
+    const reason = callerSignal && callerSignal.reason;
+    controller.abort(reason === undefined ? new Error("fetch aborted by caller") : reason);
+  };
+
+  if (callerSignal) {
+    if (callerSignal.aborted) forwardCallerAbort();
+    else callerSignal.addEventListener("abort", forwardCallerAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(new Error(`fetch timeout after ${timeout}ms`)), timeout);
 
   try {
@@ -56,6 +66,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS_
     return await fetch(url, merged);
   } finally {
     clearTimeout(timer);
+    if (callerSignal) callerSignal.removeEventListener("abort", forwardCallerAbort);
   }
 }
 

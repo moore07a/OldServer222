@@ -3,7 +3,8 @@
 module.exports = function createHealthRuntime(dependencies) {
   const {
     TURNSTILE_ORIGIN, _health, addLog, fetchWithTimeout,
-    logActiveRequestDiagnostics, parseMinHourToMs, runtimeStats,
+    logActiveRequestDiagnostics, parseMinHourToMs, readMsEnv,
+    readPositiveIntEnv, runtimeStats,
     scheduleFatalExit, summarizeError, trackIntervalHandle
   } = dependencies;
 
@@ -11,10 +12,10 @@ module.exports = function createHealthRuntime(dependencies) {
   const HEALTH_HEARTBEAT_MS = parseMinHourToMs(process.env.HEALTH_HEARTBEAT ?? "2h", 2 * 60 * 60 * 1000);
 
   // Event-loop monitor settings are immutable after startup.
-  const EVENT_LOOP_LAG_WARN_MS = Math.max(100, parseInt(process.env.EVENT_LOOP_LAG_WARN_MS || "500", 10));
-  const EVENT_LOOP_LAG_SAMPLE_MS = Math.max(250, parseInt(process.env.EVENT_LOOP_LAG_SAMPLE_MS || "1000", 10));
-  const EVENT_LOOP_FATAL_MS = Math.max(1000, parseInt(process.env.EVENT_LOOP_FATAL_MS || "20000", 10));
-  const EVENT_LOOP_FATAL_CONSECUTIVE = Math.max(1, parseInt(process.env.EVENT_LOOP_FATAL_CONSECUTIVE || "3", 10));
+  const EVENT_LOOP_LAG_WARN_MS = readMsEnv("EVENT_LOOP_LAG_WARN_MS", 500, 100);
+  const EVENT_LOOP_LAG_SAMPLE_MS = readMsEnv("EVENT_LOOP_LAG_SAMPLE_MS", 1000, 250);
+  const EVENT_LOOP_FATAL_MS = readMsEnv("EVENT_LOOP_FATAL_MS", 20000, 1000);
+  const EVENT_LOOP_FATAL_CONSECUTIVE = readPositiveIntEnv("EVENT_LOOP_FATAL_CONSECUTIVE", 3);
   let eventLoopStallConsecutiveHits = 0;
 
   function startEventLoopLagMonitor() {

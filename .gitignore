@@ -1,0 +1,20 @@
+# Installed dependencies
+node_modules/
+
+# Runtime-generated data
+runtime-diagnostics/
+visitors.log
+visitors.log.*
+*.pid
+
+# Local environment and package-manager state
+.env
+.env.*
+!.env.example
+.npmrc
+npm-debug.log*
+
+# Editor and operating-system files
+.DS_Store
+.vscode/
+.idea/
