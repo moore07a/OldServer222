@@ -1070,6 +1070,7 @@ const {
   toReasonCode,
   applyMemoryPressureRelief,
   shouldApplyMemoryPressureRelief,
+  pruneExpiredHeadProbes,
   markInterstitialHuman,
   INTERSTITIAL_BYPASS_SECRET,
   hasInterstitialBypass,
@@ -1557,6 +1558,7 @@ const server = app.listen(PORT, async () => {
     pruneAlertState(now);
     cleanupKnownScannerIps(now);
     cleanupRequestHistory(now);
+    pruneExpiredHeadProbes(now);
     if (shouldApplyMemoryPressureRelief(mem)) {
       applyMemoryPressureRelief(now, "scheduled_cleanup");
     }

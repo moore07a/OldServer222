@@ -239,14 +239,17 @@ function pruneMapToTargetSize(map, targetSize, getRankValue = null) {
 }
 
 function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
+  pruneExpiredHeadProbes(now);
   const targetHistory = Math.max(500, Math.floor(BEHAVIORAL_CONFIG.maxIpsBeforeCleanup * 0.6));
   const targetInterstitial = Math.max(500, Math.floor(INTERSTITIAL_MAX_ENTRIES * 0.6));
+  const targetHeadProbes = Math.max(500, Math.floor(RECENT_HEAD_PROBE_MAX_ENTRIES * 0.6));
   const targetKnownScanners = Math.max(500, Math.floor(KNOWN_SCANNER_MAX * 0.6));
   const targetAdminHits = Math.max(100, Math.floor(ADMIN_HIT_TTL_MS / 1000));
 
   const evicted = {
     requestHistory: 0,
     interstitialState: 0,
+    recentHeadProbes: 0,
     knownScannerIps: 0,
     adminHits: 0
   };
@@ -263,6 +266,9 @@ function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
       targetInterstitial,
       (entry) => Number(entry && entry.lastSeenAt || 0)
     );
+  }
+  if (RECENT_HEAD_PROBES.size > targetHeadProbes) {
+    evicted.recentHeadProbes = pruneMapToTargetSize(RECENT_HEAD_PROBES, targetHeadProbes);
   }
   if (KNOWN_SCANNER_IPS.size > targetKnownScanners) {
     evicted.knownScannerIps = pruneMapToTargetSize(
@@ -281,7 +287,7 @@ function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
 
   const totalEvicted = Object.values(evicted).reduce((sum, n) => sum + n, 0);
   if (totalEvicted > 0) {
-    addLog(`[MEMORY] relief reason=${safeLogValue(reason, 48)} evicted=${totalEvicted} requestHistory=${evicted.requestHistory} interstitial=${evicted.interstitialState} knownScannerIps=${evicted.knownScannerIps} adminHits=${evicted.adminHits}`);
+    addLog(`[MEMORY] relief reason=${safeLogValue(reason, 48)} evicted=${totalEvicted} requestHistory=${evicted.requestHistory} interstitial=${evicted.interstitialState} recentHeadProbes=${evicted.recentHeadProbes} knownScannerIps=${evicted.knownScannerIps} adminHits=${evicted.adminHits}`);
   }
   return totalEvicted;
 }
@@ -440,7 +446,7 @@ function logScannerSafetyLane(req, payloadPath, mode, reason, source = "unknown"
 }
 
 function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
-  rememberHeadProbe(req);
+  if (payloadPath && validateBase64Url(payloadPath)) rememberHeadProbe(req);
   const scannerProfile = options.scannerProfile || null;
   applyScannerCompatHeaders(res);
   if (scannerProfile) {
@@ -1285,6 +1291,7 @@ async function handleRedirectCore(req, res, baseString){
     toReasonCode,
     applyMemoryPressureRelief,
     shouldApplyMemoryPressureRelief,
+    pruneExpiredHeadProbes,
     markInterstitialHuman,
     INTERSTITIAL_BYPASS_SECRET,
     hasInterstitialBypass,

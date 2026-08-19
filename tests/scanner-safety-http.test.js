@@ -58,6 +58,19 @@ test("scanner safety lane works through real Express HTTP routes", { timeout: 30
   t.after(() => { if (child.exitCode === null) child.kill("SIGTERM"); });
   await waitForServer(baseUrl, child);
 
+  const emptyEmailHead = await fetch(`${baseUrl}/e`, {
+    method: "HEAD",
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(emptyEmailHead.status, 200);
+  const afterEmptyProbe = await fetch(`${baseUrl}/${payload}`, {
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(afterEmptyProbe.status, 302);
+  assert.match(afterEmptyProbe.headers.get("location") || "", /\/challenge\?/);
+
   const trusted = await fetch(`${baseUrl}/${payload}`, {
     headers: { "user-agent": "safelinks.protection.outlook.com" },
     redirect: "manual"
