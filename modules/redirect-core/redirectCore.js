@@ -160,8 +160,8 @@ function pruneExpiredHeadProbes(now) {
   // boundedMapSet refreshes an existing key by moving it to the end, so entries
   // remain ordered from least- to most-recently seen. Stop at the first fresh
   // entry instead of walking the entire map during every scanner request.
-  for (const [key, seenAt] of RECENT_HEAD_PROBES.entries()) {
-    if ((now - Number(seenAt || 0)) <= RECENT_HEAD_PROBE_TTL_MS) break;
+  for (const [key, entry] of RECENT_HEAD_PROBES.entries()) {
+    if ((now - Number(entry && entry.seenAt || 0)) <= RECENT_HEAD_PROBE_TTL_MS) break;
     RECENT_HEAD_PROBES.delete(key);
   }
 }
@@ -170,23 +170,42 @@ async function rememberHeadProbe(req) {
   const now = Date.now();
   pruneExpiredHeadProbes(now);
   const key = headProbeKey(req);
-  boundedMapSet(RECENT_HEAD_PROBES, key, now, RECENT_HEAD_PROBE_MAX_ENTRIES);
-  await sharedHeadProbeStore.remember(key);
+  const existing = RECENT_HEAD_PROBES.get(key);
+  const entry = {
+    seenAt: now,
+    sharedAt: Number(existing && existing.sharedAt || 0)
+  };
+  const shouldRefreshShared = !entry.sharedAt || (now - entry.sharedAt) >= (RECENT_HEAD_PROBE_TTL_MS / 2);
+  if (shouldRefreshShared) entry.sharedAt = now;
+  boundedMapSet(RECENT_HEAD_PROBES, key, entry, RECENT_HEAD_PROBE_MAX_ENTRIES);
+  if (shouldRefreshShared) await sharedHeadProbeStore.remember(key);
 }
 
-async function isRecentHeaderlessScannerGet(req) {
+async function isRecentHeaderlessScannerGet(req, baseString) {
   if (req.method !== "GET") return false;
-  // Credential-bearing clients must reach Turnstile verification even when
-  // they omit browser presentation headers.
-  if ((req.query && req.query.cft) || req.get("cf-turnstile-response")) return false;
   if (req.get("user-agent") || req.get("accept-language") || req.get("accept")) return false;
   const key = headProbeKey(req);
-  const seenAt = Number(RECENT_HEAD_PROBES.get(key) || 0);
-  if (seenAt && (Date.now() - seenAt) <= RECENT_HEAD_PROBE_TTL_MS) return true;
-  if (seenAt) {
+  const entry = RECENT_HEAD_PROBES.get(key);
+  const seenAt = Number(entry && entry.seenAt || 0);
+  let correlated = seenAt && (Date.now() - seenAt) <= RECENT_HEAD_PROBE_TTL_MS;
+  if (seenAt && !correlated) {
     RECENT_HEAD_PROBES.delete(key);
   }
-  return sharedHeadProbeStore.has(key);
+  if (!correlated) correlated = await sharedHeadProbeStore.has(key);
+  if (!correlated) return false;
+
+  const token = (req.query && req.query.cft) || req.get("cf-turnstile-response") || "";
+  if (!token) return true;
+  const identity = getRequestIdentity(req);
+  const linkHash = req.query && req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
+  const verified = await verifyTurnstileToken(token, identity.ip, {
+    action: "link_redirect",
+    linkHash,
+    maxAgeSec: MAX_TOKEN_AGE_SEC
+  });
+  if (!verified.ok) return true;
+  req._preverifiedTurnstile = { token, linkHash, verified };
+  return false;
 }
 
 function sendHeaderlessScannerFollowupResponse(req, res, payloadPath, source) {
@@ -636,7 +655,7 @@ app.use((req, res, next) => {
 
   if (req.method === "GET" && pathMatchesWithOptionalPrefix(req.path, "/e")) {
     const clean = extractEmailSafePayloadPath(req);
-    if (await isRecentHeaderlessScannerGet(req)) {
+    if (await isRecentHeaderlessScannerGet(req, clean)) {
       return sendHeaderlessScannerFollowupResponse(req, res, clean, "email-safe");
     }
     const scannerCtx = buildScannerInterstitialContext(req, "GET-probe");
@@ -884,7 +903,10 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
   const token = req.query.cft || req.get("cf-turnstile-response") || "";
   const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
 
-  const v = await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
+  const preverified = req._preverifiedTurnstile;
+  const v = preverified && preverified.token === token && preverified.linkHash === linkHash
+    ? preverified.verified
+    : await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
   if (!v.ok) {
     addLog(`[AUTH] token invalid (${v.reason}) ip=${safeLogValue(ip)} ua="${safeLogValue(ua.slice(0, UA_TRUNCATE_LENGTH))}" -> /challenge`);
     // Missing token is normal for first-time human visits; reserve bypass alerts
@@ -1194,7 +1216,7 @@ async function handleRedirectCore(req, res, baseString){
       });
     }
 
-    if (!bypassInterstitial && await isRecentHeaderlessScannerGet(req)) {
+    if (!bypassInterstitial && await isRecentHeaderlessScannerGet(req, baseString)) {
       return sendHeaderlessScannerFollowupResponse(req, res, baseString, "catchall");
     }
 

@@ -1189,15 +1189,28 @@ test('HEAD safety-lane responses set explicit head-probe reason headers', () => 
   assert.match(catchAllHeadSource, /sendScannerSafetyLaneHeadResponse\(req, res, clean, "HEAD-probe"/);
 });
 
-test('credential-bearing GETs bypass headerless scanner suppression', () => {
+test('only verified credential-bearing GETs bypass headerless scanner suppression', () => {
   const source = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
   const helperStart = source.indexOf('async function isRecentHeaderlessScannerGet');
   const helperEnd = source.indexOf('\nfunction sendHeaderlessScannerFollowupResponse', helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
   const helper = source.slice(helperStart, helperEnd);
   const credentialCheck = helper.indexOf('req.query.cft');
-  const presentationCheck = helper.indexOf('req.get("user-agent")');
-  assert.ok(credentialCheck >= 0, 'credential exemption should be present');
-  assert.ok(credentialCheck < presentationCheck, 'credential exemption must run before headerless classification');
+  const verificationCheck = helper.indexOf('await verifyTurnstileToken');
+  const verifiedExemption = helper.indexOf('if (!verified.ok) return true');
+  assert.ok(credentialCheck >= 0, 'credential handling should be present');
+  assert.ok(verificationCheck > credentialCheck, 'credentials must be verified');
+  assert.ok(verifiedExemption > verificationCheck, 'invalid credentials must stay suppressed');
   assert.match(helper, /cf-turnstile-response/);
+  assert.match(helper, /req\._preverifiedTurnstile/);
+});
+
+test('shared HEAD probe TTL refreshes are throttled per identity', () => {
+  const source = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const helperStart = source.indexOf('async function rememberHeadProbe');
+  const helperEnd = source.indexOf('\nasync function isRecentHeaderlessScannerGet', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /RECENT_HEAD_PROBE_TTL_MS \/ 2/);
+  assert.match(helper, /if \(shouldRefreshShared\) await sharedHeadProbeStore\.remember\(key\)/);
 });
