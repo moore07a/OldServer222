@@ -101,6 +101,30 @@ test("scanner safety lane works through real Express HTTP routes", { timeout: 30
   assert.equal(emailHead.headers.get("x-interstitial-reason-code"), "head_probe");
   assert.equal(await emailHead.text(), "");
 
+  const correlatedHead = await fetch(`${baseUrl}/${payload}`, {
+    method: "HEAD",
+    headers: { "user-agent": "", accept: "", "accept-language": "" }
+  });
+  assert.equal(correlatedHead.status, 200);
+  const correlatedGet = await fetch(`${baseUrl}/${payload}`, {
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(correlatedGet.status, 204);
+  assert.equal(correlatedGet.headers.get("location"), null);
+  assert.equal(correlatedGet.headers.get("x-interstitial-reason-code"), "head_probe");
+  assert.equal(await correlatedGet.text(), "");
+
+  // The scanner walks different payloads and optional-prefix normalization can
+  // change the value passed to redirect handling. IP-scoped lane state must keep
+  // all headerless follow-ups away from /challenge without affecting browsers.
+  const differentPayloadGet = await fetch(`${baseUrl}/${shortPayload}`, {
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(differentPayloadGet.status, 204);
+  assert.equal(differentPayloadGet.headers.get("location"), null);
+
   const browser = await fetch(`${baseUrl}/${payload}`, {
     headers: {
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",

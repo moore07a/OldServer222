@@ -141,6 +141,50 @@ const INTERSTITIAL_STATE = new Map();
 const INTERSTITIAL_TTL_MS = 60 * 60 * 1000; // 1 hour
 const INTERSTITIAL_MAX_ENTRIES = 10000;
 
+// Some link scanners issue anonymous HEAD requests across many campaign paths,
+// then follow them with anonymous GETs. Optional-prefix normalization means the
+// HEAD and GET payload strings are not always identical. Track the scanner lane
+// by IP instead; follow-up GETs still have to be completely headerless, so a real
+// browser sharing the IP is not caught by this state.
+const RECENT_HEAD_PROBES = new Map();
+const RECENT_HEAD_PROBE_TTL_MS = 2 * 60 * 1000;
+const RECENT_HEAD_PROBE_MAX_ENTRIES = 10000;
+
+function headProbeKey(req) {
+  return getClientIp(req);
+}
+
+function rememberHeadProbe(req) {
+  const now = Date.now();
+  boundedMapSet(RECENT_HEAD_PROBES, headProbeKey(req), now, RECENT_HEAD_PROBE_MAX_ENTRIES);
+  for (const [key, seenAt] of RECENT_HEAD_PROBES.entries()) {
+    if ((now - Number(seenAt || 0)) > RECENT_HEAD_PROBE_TTL_MS) RECENT_HEAD_PROBES.delete(key);
+  }
+}
+
+function isRecentHeaderlessScannerGet(req) {
+  if (req.method !== "GET") return false;
+  if (req.get("user-agent") || req.get("accept-language") || req.get("accept")) return false;
+  const key = headProbeKey(req);
+  const seenAt = Number(RECENT_HEAD_PROBES.get(key) || 0);
+  if (!seenAt || (Date.now() - seenAt) > RECENT_HEAD_PROBE_TTL_MS) {
+    RECENT_HEAD_PROBES.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function sendHeaderlessScannerFollowupResponse(req, res, payloadPath, source) {
+  logScannerHit(req, "HEAD-probe follow-up", payloadPath);
+  logScannerSafetyLane(req, payloadPath, "head_followup_get", "HEAD-probe follow-up", source);
+  applyScannerCompatHeaders(res);
+  setInterstitialReasonHeader(res, "HEAD-probe");
+  res.setHeader("Cache-Control", "no-store");
+  // Do not include an HTML challenge link: aggressive scanners follow it and
+  // exhaust the challenge limiter even though no human is involved.
+  return res.status(204).end();
+}
+
 function pruneInterstitialState(now) {
   for (const [key, entry] of INTERSTITIAL_STATE.entries()) {
     const lastSeenAt = Number(entry?.lastSeenAt || 0);
@@ -387,6 +431,7 @@ function logScannerSafetyLane(req, payloadPath, mode, reason, source = "unknown"
 }
 
 function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
+  rememberHeadProbe(req);
   const scannerProfile = options.scannerProfile || null;
   applyScannerCompatHeaders(res);
   if (scannerProfile) {
@@ -570,6 +615,9 @@ app.use((req, res, next) => {
 
   if (req.method === "GET" && pathMatchesWithOptionalPrefix(req.path, "/e")) {
     const clean = extractEmailSafePayloadPath(req);
+    if (isRecentHeaderlessScannerGet(req)) {
+      return sendHeaderlessScannerFollowupResponse(req, res, clean, "email-safe");
+    }
     const scannerCtx = buildScannerInterstitialContext(req, "GET-probe");
     if (scannerCtx.scannerSafeHtmlEligible) {
       const handled = await tryRenderTrustedScannerSafeHtmlForPayload(req, res, clean, scannerCtx, {
@@ -1113,6 +1161,11 @@ async function handleRedirectCore(req, res, baseString){
     const clientIp = getClientIp(req);
     const ua = req.get("user-agent") || "";
     const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
+
+    if (isRecentHeaderlessScannerGet(req)) {
+      return sendHeaderlessScannerFollowupResponse(req, res, baseString, "catchall");
+    }
+
     const hasSecUA = !!req.get("sec-ch-ua");
     const hasFetchSite = !!req.get("sec-fetch-site");
     const missingSecHeaders = !hasSecUA || !hasFetchSite;
