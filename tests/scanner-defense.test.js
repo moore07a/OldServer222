@@ -1214,5 +1214,5 @@ test('shared HEAD probe TTL refreshes are throttled per identity', () => {
   assert.match(helper, /SHARED_HEAD_PROBE_REFRESH_MS/);
   assert.match(helper, /setTimeout/);
   assert.match(helper, /sharedHeadProbeStore\.remember\(key, writtenSeenAt\)/);
-  assert.match(helper, /if \(written && latest\) latest\.sharedAt/);
+  assert.match(helper, /if \(sharedSeenAt && latest\) latest\.sharedAt/);
 });

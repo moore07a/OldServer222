@@ -188,10 +188,10 @@ async function rememberHeadProbe(req) {
     if (current.sharedAttemptAt && (attemptNow - current.sharedAttemptAt) < SHARED_HEAD_PROBE_RETRY_MS) return false;
     current.sharedAttemptAt = attemptNow;
     const writtenSeenAt = current.seenAt;
-    const written = await sharedHeadProbeStore.remember(key, writtenSeenAt);
+    const sharedSeenAt = await sharedHeadProbeStore.remember(key, writtenSeenAt);
     const latest = RECENT_HEAD_PROBES.get(key);
-    if (written && latest) latest.sharedAt = Math.max(Number(latest.sharedAt || 0), writtenSeenAt);
-    return written;
+    if (sharedSeenAt && latest) latest.sharedAt = Math.max(Number(latest.sharedAt || 0), Number(sharedSeenAt));
+    return !!sharedSeenAt;
   }
 
   if (!entry.sharedAt || (now - entry.sharedAt) >= SHARED_HEAD_PROBE_REFRESH_MS) {

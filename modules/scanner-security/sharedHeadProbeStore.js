@@ -1,5 +1,15 @@
 "use strict";
 
+const REMEMBER_IF_NEWER_SCRIPT = `
+local current = tonumber(redis.call("GET", KEYS[1]))
+local incoming = tonumber(ARGV[1])
+if current and current > incoming then
+  return current
+end
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+return incoming
+`;
+
 function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanner:head-probe", now = Date.now }) {
   const enabled = !!client;
 
@@ -20,8 +30,15 @@ function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanne
     const remainingTtlMs = Math.ceil(ttlMs - Math.max(0, now() - Number(seenAt || 0)));
     if (remainingTtlMs <= 0) return false;
     try {
-      await client.set(redisKey(identityKey), "1", "PX", remainingTtlMs);
-      return true;
+      const result = await client.eval(
+        REMEMBER_IF_NEWER_SCRIPT,
+        1,
+        redisKey(identityKey),
+        String(Number(seenAt)),
+        String(remainingTtlMs)
+      );
+      const storedSeenAt = Number(result);
+      return Number.isFinite(storedSeenAt) && storedSeenAt > 0 ? storedSeenAt : false;
     } catch (_) {
       return false;
     }
