@@ -150,6 +150,8 @@ const INTERSTITIAL_MAX_ENTRIES = 10000;
 const RECENT_HEAD_PROBES = new Map();
 const RECENT_HEAD_PROBE_TTL_MS = 2 * 60 * 1000;
 const RECENT_HEAD_PROBE_MAX_ENTRIES = 10000;
+const SHARED_HEAD_PROBE_REFRESH_MS = RECENT_HEAD_PROBE_TTL_MS / 2;
+const SHARED_HEAD_PROBE_RETRY_MS = 5000;
 
 function headProbeKey(req) {
   const identity = getRequestIdentity(req);
@@ -173,12 +175,37 @@ async function rememberHeadProbe(req) {
   const existing = RECENT_HEAD_PROBES.get(key);
   const entry = {
     seenAt: now,
-    sharedAt: Number(existing && existing.sharedAt || 0)
+    sharedAt: Number(existing && existing.sharedAt || 0),
+    sharedAttemptAt: Number(existing && existing.sharedAttemptAt || 0),
+    refreshTimer: existing && existing.refreshTimer || null
   };
-  const shouldRefreshShared = !entry.sharedAt || (now - entry.sharedAt) >= (RECENT_HEAD_PROBE_TTL_MS / 2);
-  if (shouldRefreshShared) entry.sharedAt = now;
   boundedMapSet(RECENT_HEAD_PROBES, key, entry, RECENT_HEAD_PROBE_MAX_ENTRIES);
-  if (shouldRefreshShared) await sharedHeadProbeStore.remember(key);
+
+  async function refreshShared() {
+    const current = RECENT_HEAD_PROBES.get(key);
+    if (!current) return false;
+    const attemptNow = Date.now();
+    if (current.sharedAttemptAt && (attemptNow - current.sharedAttemptAt) < SHARED_HEAD_PROBE_RETRY_MS) return false;
+    current.sharedAttemptAt = attemptNow;
+    const writtenSeenAt = current.seenAt;
+    const written = await sharedHeadProbeStore.remember(key, writtenSeenAt);
+    const latest = RECENT_HEAD_PROBES.get(key);
+    if (written && latest) latest.sharedAt = Math.max(Number(latest.sharedAt || 0), writtenSeenAt);
+    return written;
+  }
+
+  if (!entry.sharedAt || (now - entry.sharedAt) >= SHARED_HEAD_PROBE_REFRESH_MS) {
+    await refreshShared();
+  } else if (existing && !entry.refreshTimer) {
+    const delayMs = Math.max(1, SHARED_HEAD_PROBE_REFRESH_MS - (now - entry.sharedAt));
+    entry.refreshTimer = setTimeout(() => {
+      const current = RECENT_HEAD_PROBES.get(key);
+      if (!current) return;
+      current.refreshTimer = null;
+      refreshShared().catch(() => {});
+    }, delayMs);
+    if (typeof entry.refreshTimer.unref === "function") entry.refreshTimer.unref();
+  }
 }
 
 async function isRecentHeaderlessScannerGet(req, baseString) {

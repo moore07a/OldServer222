@@ -1211,6 +1211,8 @@ test('shared HEAD probe TTL refreshes are throttled per identity', () => {
   const helperEnd = source.indexOf('\nasync function isRecentHeaderlessScannerGet', helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart);
   const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /RECENT_HEAD_PROBE_TTL_MS \/ 2/);
-  assert.match(helper, /if \(shouldRefreshShared\) await sharedHeadProbeStore\.remember\(key\)/);
+  assert.match(helper, /SHARED_HEAD_PROBE_REFRESH_MS/);
+  assert.match(helper, /setTimeout/);
+  assert.match(helper, /sharedHeadProbeStore\.remember\(key, writtenSeenAt\)/);
+  assert.match(helper, /if \(written && latest\) latest\.sharedAt/);
 });

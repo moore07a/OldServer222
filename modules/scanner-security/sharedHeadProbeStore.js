@@ -1,6 +1,6 @@
 "use strict";
 
-function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanner:head-probe" }) {
+function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanner:head-probe", now = Date.now }) {
   const enabled = !!client;
 
   function isReady() {
@@ -15,10 +15,12 @@ function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanne
     return `${keyPrefix}:${digest}`;
   }
 
-  async function remember(identityKey) {
+  async function remember(identityKey, seenAt = now()) {
     if (!isReady()) return false;
+    const remainingTtlMs = Math.ceil(ttlMs - Math.max(0, now() - Number(seenAt || 0)));
+    if (remainingTtlMs <= 0) return false;
     try {
-      await client.set(redisKey(identityKey), "1", "PX", ttlMs);
+      await client.set(redisKey(identityKey), "1", "PX", remainingTtlMs);
       return true;
     } catch (_) {
       return false;
