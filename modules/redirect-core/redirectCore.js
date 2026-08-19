@@ -151,15 +151,24 @@ const RECENT_HEAD_PROBE_TTL_MS = 2 * 60 * 1000;
 const RECENT_HEAD_PROBE_MAX_ENTRIES = 10000;
 
 function headProbeKey(req) {
-  return getClientIp(req);
+  const identity = getRequestIdentity(req);
+  return identity.keyIp || identity.denyCacheKey || "unknown";
+}
+
+function pruneExpiredHeadProbes(now) {
+  // boundedMapSet refreshes an existing key by moving it to the end, so entries
+  // remain ordered from least- to most-recently seen. Stop at the first fresh
+  // entry instead of walking the entire map during every scanner request.
+  for (const [key, seenAt] of RECENT_HEAD_PROBES.entries()) {
+    if ((now - Number(seenAt || 0)) <= RECENT_HEAD_PROBE_TTL_MS) break;
+    RECENT_HEAD_PROBES.delete(key);
+  }
 }
 
 function rememberHeadProbe(req) {
   const now = Date.now();
+  pruneExpiredHeadProbes(now);
   boundedMapSet(RECENT_HEAD_PROBES, headProbeKey(req), now, RECENT_HEAD_PROBE_MAX_ENTRIES);
-  for (const [key, seenAt] of RECENT_HEAD_PROBES.entries()) {
-    if ((now - Number(seenAt || 0)) > RECENT_HEAD_PROBE_TTL_MS) RECENT_HEAD_PROBES.delete(key);
-  }
 }
 
 function isRecentHeaderlessScannerGet(req) {
