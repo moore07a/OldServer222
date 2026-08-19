@@ -24,6 +24,7 @@ function createRedirectCore(dependencies) {
     SCANNER_GENERIC_PROFILE,
     SCANNER_INTERSTITIAL_SCOPE,
     SCANNER_SAFE_HTML_ENABLED,
+    sharedHeadProbeStore,
     UA_TRUNCATE_LENGTH,
     URL_DISPLAY_MAX_LENGTH,
     VISIBLE_IP_REPUTATION_WEIGHTS,
@@ -165,22 +166,24 @@ function pruneExpiredHeadProbes(now) {
   }
 }
 
-function rememberHeadProbe(req) {
+async function rememberHeadProbe(req) {
   const now = Date.now();
   pruneExpiredHeadProbes(now);
-  boundedMapSet(RECENT_HEAD_PROBES, headProbeKey(req), now, RECENT_HEAD_PROBE_MAX_ENTRIES);
+  const key = headProbeKey(req);
+  boundedMapSet(RECENT_HEAD_PROBES, key, now, RECENT_HEAD_PROBE_MAX_ENTRIES);
+  await sharedHeadProbeStore.remember(key);
 }
 
-function isRecentHeaderlessScannerGet(req) {
+async function isRecentHeaderlessScannerGet(req) {
   if (req.method !== "GET") return false;
   if (req.get("user-agent") || req.get("accept-language") || req.get("accept")) return false;
   const key = headProbeKey(req);
   const seenAt = Number(RECENT_HEAD_PROBES.get(key) || 0);
-  if (!seenAt || (Date.now() - seenAt) > RECENT_HEAD_PROBE_TTL_MS) {
+  if (seenAt && (Date.now() - seenAt) <= RECENT_HEAD_PROBE_TTL_MS) return true;
+  if (seenAt) {
     RECENT_HEAD_PROBES.delete(key);
-    return false;
   }
-  return true;
+  return sharedHeadProbeStore.has(key);
 }
 
 function sendHeaderlessScannerFollowupResponse(req, res, payloadPath, source) {
@@ -445,8 +448,8 @@ function logScannerSafetyLane(req, payloadPath, mode, reason, source = "unknown"
   addLog(`[SCANNER-SAFETY-LANE] source=${safeLogValue(source, 32)} virtualPath=${virtualPath} mode=${safeLogValue(mode, 48)} reason=${safeLogValue(reason || "-", 80)} ip=${safeLogValue(ip, 64)} method=${safeLogValue(req.method, 12)} originalPath=${requestPath}`);
 }
 
-function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
-  if (payloadPath && validateBase64Url(payloadPath)) rememberHeadProbe(req);
+async function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
+  if (payloadPath && validateBase64Url(payloadPath)) await rememberHeadProbe(req);
   const scannerProfile = options.scannerProfile || null;
   applyScannerCompatHeaders(res);
   if (scannerProfile) {
@@ -630,7 +633,7 @@ app.use((req, res, next) => {
 
   if (req.method === "GET" && pathMatchesWithOptionalPrefix(req.path, "/e")) {
     const clean = extractEmailSafePayloadPath(req);
-    if (isRecentHeaderlessScannerGet(req)) {
+    if (await isRecentHeaderlessScannerGet(req)) {
       return sendHeaderlessScannerFollowupResponse(req, res, clean, "email-safe");
     }
     const scannerCtx = buildScannerInterstitialContext(req, "GET-probe");
@@ -1188,7 +1191,7 @@ async function handleRedirectCore(req, res, baseString){
       });
     }
 
-    if (!bypassInterstitial && isRecentHeaderlessScannerGet(req)) {
+    if (!bypassInterstitial && await isRecentHeaderlessScannerGet(req)) {
       return sendHeaderlessScannerFollowupResponse(req, res, baseString, "catchall");
     }
 
