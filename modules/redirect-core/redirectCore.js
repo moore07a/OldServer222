@@ -24,6 +24,7 @@ function createRedirectCore(dependencies) {
     SCANNER_GENERIC_PROFILE,
     SCANNER_INTERSTITIAL_SCOPE,
     SCANNER_SAFE_HTML_ENABLED,
+    sharedHeadProbeStore,
     UA_TRUNCATE_LENGTH,
     URL_DISPLAY_MAX_LENGTH,
     VISIBLE_IP_REPUTATION_WEIGHTS,
@@ -141,6 +142,110 @@ const INTERSTITIAL_STATE = new Map();
 const INTERSTITIAL_TTL_MS = 60 * 60 * 1000; // 1 hour
 const INTERSTITIAL_MAX_ENTRIES = 10000;
 
+// Some link scanners issue anonymous HEAD requests across many campaign paths,
+// then follow them with anonymous GETs. Optional-prefix normalization means the
+// HEAD and GET payload strings are not always identical. Track the scanner lane
+// by IP instead; follow-up GETs still have to be completely headerless, so a real
+// browser sharing the IP is not caught by this state.
+const RECENT_HEAD_PROBES = new Map();
+const RECENT_HEAD_PROBE_TTL_MS = 2 * 60 * 1000;
+const RECENT_HEAD_PROBE_MAX_ENTRIES = 10000;
+const SHARED_HEAD_PROBE_REFRESH_MS = RECENT_HEAD_PROBE_TTL_MS / 2;
+const SHARED_HEAD_PROBE_RETRY_MS = 5000;
+
+function headProbeKey(req) {
+  const identity = getRequestIdentity(req);
+  return identity.keyIp || identity.denyCacheKey || "unknown";
+}
+
+function pruneExpiredHeadProbes(now) {
+  // boundedMapSet refreshes an existing key by moving it to the end, so entries
+  // remain ordered from least- to most-recently seen. Stop at the first fresh
+  // entry instead of walking the entire map during every scanner request.
+  for (const [key, entry] of RECENT_HEAD_PROBES.entries()) {
+    if ((now - Number(entry && entry.seenAt || 0)) <= RECENT_HEAD_PROBE_TTL_MS) break;
+    RECENT_HEAD_PROBES.delete(key);
+  }
+}
+
+async function rememberHeadProbe(req) {
+  const now = Date.now();
+  pruneExpiredHeadProbes(now);
+  const key = headProbeKey(req);
+  const existing = RECENT_HEAD_PROBES.get(key);
+  const entry = {
+    seenAt: now,
+    sharedAt: Number(existing && existing.sharedAt || 0),
+    sharedAttemptAt: Number(existing && existing.sharedAttemptAt || 0),
+    refreshTimer: existing && existing.refreshTimer || null
+  };
+  boundedMapSet(RECENT_HEAD_PROBES, key, entry, RECENT_HEAD_PROBE_MAX_ENTRIES);
+
+  async function refreshShared() {
+    const current = RECENT_HEAD_PROBES.get(key);
+    if (!current) return false;
+    const attemptNow = Date.now();
+    if (current.sharedAttemptAt && (attemptNow - current.sharedAttemptAt) < SHARED_HEAD_PROBE_RETRY_MS) return false;
+    current.sharedAttemptAt = attemptNow;
+    const writtenSeenAt = current.seenAt;
+    const sharedSeenAt = await sharedHeadProbeStore.remember(key, writtenSeenAt);
+    const latest = RECENT_HEAD_PROBES.get(key);
+    if (sharedSeenAt && latest) latest.sharedAt = Math.max(Number(latest.sharedAt || 0), Number(sharedSeenAt));
+    return !!sharedSeenAt;
+  }
+
+  if (!entry.sharedAt || (now - entry.sharedAt) >= SHARED_HEAD_PROBE_REFRESH_MS) {
+    await refreshShared();
+  } else if (existing && !entry.refreshTimer) {
+    const delayMs = Math.max(1, SHARED_HEAD_PROBE_REFRESH_MS - (now - entry.sharedAt));
+    entry.refreshTimer = setTimeout(() => {
+      const current = RECENT_HEAD_PROBES.get(key);
+      if (!current) return;
+      current.refreshTimer = null;
+      refreshShared().catch(() => {});
+    }, delayMs);
+    if (typeof entry.refreshTimer.unref === "function") entry.refreshTimer.unref();
+  }
+}
+
+async function isRecentHeaderlessScannerGet(req, baseString) {
+  if (req.method !== "GET") return false;
+  if (req.get("user-agent") || req.get("accept-language") || req.get("accept")) return false;
+  const key = headProbeKey(req);
+  const entry = RECENT_HEAD_PROBES.get(key);
+  const seenAt = Number(entry && entry.seenAt || 0);
+  let correlated = seenAt && (Date.now() - seenAt) <= RECENT_HEAD_PROBE_TTL_MS;
+  if (seenAt && !correlated) {
+    RECENT_HEAD_PROBES.delete(key);
+  }
+  if (!correlated) correlated = await sharedHeadProbeStore.has(key);
+  if (!correlated) return false;
+
+  const token = (req.query && req.query.cft) || req.get("cf-turnstile-response") || "";
+  if (!token) return true;
+  const identity = getRequestIdentity(req);
+  const linkHash = req.query && req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
+  const verified = await verifyTurnstileToken(token, identity.ip, {
+    action: "link_redirect",
+    linkHash,
+    maxAgeSec: MAX_TOKEN_AGE_SEC
+  });
+  if (!verified.ok) return true;
+  req._preverifiedTurnstile = { token, linkHash, verified };
+  return false;
+}
+
+function sendHeaderlessScannerFollowupResponse(req, res, payloadPath, source) {
+  logScannerHit(req, "HEAD-probe follow-up", payloadPath);
+  logScannerSafetyLane(req, payloadPath, "head_followup_get", "HEAD-probe follow-up", source);
+  applyScannerCompatHeaders(res);
+  setInterstitialReasonHeader(res, "HEAD-probe");
+  res.setHeader("Cache-Control", "no-store");
+  // Do not include an HTML challenge link: aggressive scanners follow it and
+  // exhaust the challenge limiter even though no human is involved.
+  return res.status(204).end();
+}
+
 function pruneInterstitialState(now) {
   for (const [key, entry] of INTERSTITIAL_STATE.entries()) {
     const lastSeenAt = Number(entry?.lastSeenAt || 0);
@@ -186,14 +291,17 @@ function pruneMapToTargetSize(map, targetSize, getRankValue = null) {
 }
 
 function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
+  pruneExpiredHeadProbes(now);
   const targetHistory = Math.max(500, Math.floor(BEHAVIORAL_CONFIG.maxIpsBeforeCleanup * 0.6));
   const targetInterstitial = Math.max(500, Math.floor(INTERSTITIAL_MAX_ENTRIES * 0.6));
+  const targetHeadProbes = Math.max(500, Math.floor(RECENT_HEAD_PROBE_MAX_ENTRIES * 0.6));
   const targetKnownScanners = Math.max(500, Math.floor(KNOWN_SCANNER_MAX * 0.6));
   const targetAdminHits = Math.max(100, Math.floor(ADMIN_HIT_TTL_MS / 1000));
 
   const evicted = {
     requestHistory: 0,
     interstitialState: 0,
+    recentHeadProbes: 0,
     knownScannerIps: 0,
     adminHits: 0
   };
@@ -210,6 +318,9 @@ function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
       targetInterstitial,
       (entry) => Number(entry && entry.lastSeenAt || 0)
     );
+  }
+  if (RECENT_HEAD_PROBES.size > targetHeadProbes) {
+    evicted.recentHeadProbes = pruneMapToTargetSize(RECENT_HEAD_PROBES, targetHeadProbes);
   }
   if (KNOWN_SCANNER_IPS.size > targetKnownScanners) {
     evicted.knownScannerIps = pruneMapToTargetSize(
@@ -228,7 +339,7 @@ function applyMemoryPressureRelief(now = Date.now(), reason = "periodic") {
 
   const totalEvicted = Object.values(evicted).reduce((sum, n) => sum + n, 0);
   if (totalEvicted > 0) {
-    addLog(`[MEMORY] relief reason=${safeLogValue(reason, 48)} evicted=${totalEvicted} requestHistory=${evicted.requestHistory} interstitial=${evicted.interstitialState} knownScannerIps=${evicted.knownScannerIps} adminHits=${evicted.adminHits}`);
+    addLog(`[MEMORY] relief reason=${safeLogValue(reason, 48)} evicted=${totalEvicted} requestHistory=${evicted.requestHistory} interstitial=${evicted.interstitialState} recentHeadProbes=${evicted.recentHeadProbes} knownScannerIps=${evicted.knownScannerIps} adminHits=${evicted.adminHits}`);
   }
   return totalEvicted;
 }
@@ -386,7 +497,8 @@ function logScannerSafetyLane(req, payloadPath, mode, reason, source = "unknown"
   addLog(`[SCANNER-SAFETY-LANE] source=${safeLogValue(source, 32)} virtualPath=${virtualPath} mode=${safeLogValue(mode, 48)} reason=${safeLogValue(reason || "-", 80)} ip=${safeLogValue(ip, 64)} method=${safeLogValue(req.method, 12)} originalPath=${requestPath}`);
 }
 
-function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
+async function sendScannerSafetyLaneHeadResponse(req, res, payloadPath, reason = "HEAD-probe", options = {}) {
+  if (payloadPath && validateBase64Url(payloadPath)) await rememberHeadProbe(req);
   const scannerProfile = options.scannerProfile || null;
   applyScannerCompatHeaders(res);
   if (scannerProfile) {
@@ -570,6 +682,9 @@ app.use((req, res, next) => {
 
   if (req.method === "GET" && pathMatchesWithOptionalPrefix(req.path, "/e")) {
     const clean = extractEmailSafePayloadPath(req);
+    if (await isRecentHeaderlessScannerGet(req, clean)) {
+      return sendHeaderlessScannerFollowupResponse(req, res, clean, "email-safe");
+    }
     const scannerCtx = buildScannerInterstitialContext(req, "GET-probe");
     if (scannerCtx.scannerSafeHtmlEligible) {
       const handled = await tryRenderTrustedScannerSafeHtmlForPayload(req, res, clean, scannerCtx, {
@@ -815,7 +930,10 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
   const token = req.query.cft || req.get("cf-turnstile-response") || "";
   const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
 
-  const v = await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
+  const preverified = req._preverifiedTurnstile;
+  const v = preverified && preverified.token === token && preverified.linkHash === linkHash
+    ? preverified.verified
+    : await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
   if (!v.ok) {
     addLog(`[AUTH] token invalid (${v.reason}) ip=${safeLogValue(ip)} ua="${safeLogValue(ua.slice(0, UA_TRUNCATE_LENGTH))}" -> /challenge`);
     // Missing token is normal for first-time human visits; reserve bypass alerts
@@ -1113,6 +1231,22 @@ async function handleRedirectCore(req, res, baseString){
     const clientIp = getClientIp(req);
     const ua = req.get("user-agent") || "";
     const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
+    const bypassInterstitial = hasInterstitialBypass(req);
+
+    // HEAD /r?d=... is dispatched by Express through the GET route and does not
+    // pass through the deep-link HEAD middleware, so establish scanner state
+    // here as well. Explicitly bypassed automation must retain normal routing.
+    if (req.method === "HEAD" && !bypassInterstitial) {
+      logScannerHit(req, "HEAD-probe", baseString);
+      return sendScannerSafetyLaneHeadResponse(req, res, baseString, "HEAD-probe", {
+        source: "redirect-route"
+      });
+    }
+
+    if (!bypassInterstitial && await isRecentHeaderlessScannerGet(req, baseString)) {
+      return sendHeaderlessScannerFollowupResponse(req, res, baseString, "catchall");
+    }
+
     const hasSecUA = !!req.get("sec-ch-ua");
     const hasFetchSite = !!req.get("sec-fetch-site");
     const missingSecHeaders = !hasSecUA || !hasFetchSite;
@@ -1212,6 +1346,7 @@ async function handleRedirectCore(req, res, baseString){
     toReasonCode,
     applyMemoryPressureRelief,
     shouldApplyMemoryPressureRelief,
+    pruneExpiredHeadProbes,
     markInterstitialHuman,
     INTERSTITIAL_BYPASS_SECRET,
     hasInterstitialBypass,

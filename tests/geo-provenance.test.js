@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-function loadGeoHelpers(env = {}) {
+function loadGeoHelpers(env = {}, options = {}) {
   const source = fs.readFileSync('modules/client-security/clientGeo.js', 'utf8');
   const start = source.indexOf('function parseIpAddress(');
   const end = source.indexOf('\nfunction getCountryResolution', start);
@@ -15,7 +15,7 @@ function loadGeoHelpers(env = {}) {
 
   const snippet = `
     const TRUST_UPSTREAM_GEO_HEADERS = false;
-    const trustProxyEffective = 1;
+    const trustProxyEffective = ${JSON.stringify(options.trustProxyEffective === undefined ? 1 : options.trustProxyEffective)};
     const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
     const FORWARDER_AUTH_HEADER = "x-mds-forwarder-auth";
     const MDS_FORWARDER_AUTH_SECRET = String(
@@ -27,7 +27,8 @@ function loadGeoHelpers(env = {}) {
       hasCloudflareGeoProvenance,
       canTrustGeoCountryHeader,
       getClientIp,
-      getDenyCacheIp
+      getDenyCacheIp,
+      getRequestIdentity
     };
   `;
   const sandbox = { process: { env }, BigInt, Number, String, Boolean, RegExp };
@@ -35,6 +36,20 @@ function loadGeoHelpers(env = {}) {
   vm.runInContext(snippet, sandbox);
   return sandbox.__loaded;
 }
+
+test('request identity keeps response-affecting keys on the direct peer when proxy headers are untrusted', () => {
+  const { getRequestIdentity } = loadGeoHelpers({}, { trustProxyEffective: false });
+  const req = makeReq('198.51.100.20', {
+    'cf-ipcountry': undefined,
+    'cf-connecting-ip': undefined,
+    'cf-ray': undefined,
+    'x-forwarded-for': '203.0.113.99'
+  });
+
+  const identity = getRequestIdentity(req);
+  assert.equal(identity.displayIp, '203.0.113.99');
+  assert.equal(identity.keyIp, '198.51.100.20');
+});
 
 function makeReq(remoteAddress, headers = {}) {
   return {

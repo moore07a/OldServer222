@@ -10,6 +10,7 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const Redis = require("ioredis");
 const { createRequire } = require("module");
 const publicContentRequire = createRequire(require.resolve("./modules/public-content/publicContent.js"));
 const coreRoutesRequire = createRequire(require.resolve("./modules/runtime-routes/coreRoutes.js"));
@@ -1065,11 +1066,31 @@ const {
 } = require("./modules/runtime-routes/adminThrottle.js");
 
 const createRedirectCore = require("./modules/redirect-core/redirectCore.js");
+const createSharedHeadProbeStore = require("./modules/scanner-security/sharedHeadProbeStore.js");
+const scannerProbeRedisUrl = String(process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "").trim();
+const scannerProbeRedis = scannerProbeRedisUrl
+  ? new Redis(scannerProbeRedisUrl, {
+      commandTimeout: 500,
+      connectTimeout: 1000,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+      retryStrategy: (attempt) => Math.min(attempt * 100, 1000)
+    })
+  : null;
+if (scannerProbeRedis) {
+  scannerProbeRedis.on("error", () => {});
+}
+const sharedHeadProbeStore = createSharedHeadProbeStore({
+  client: scannerProbeRedis,
+  crypto,
+  ttlMs: 2 * 60 * 1000
+});
 const {
   INTERSTITIAL_REASON_HEADER_ENABLED,
   toReasonCode,
   applyMemoryPressureRelief,
   shouldApplyMemoryPressureRelief,
+  pruneExpiredHeadProbes,
   markInterstitialHuman,
   INTERSTITIAL_BYPASS_SECRET,
   hasInterstitialBypass,
@@ -1100,6 +1121,7 @@ const {
   SCANNER_GENERIC_PROFILE,
   SCANNER_INTERSTITIAL_SCOPE,
   SCANNER_SAFE_HTML_ENABLED,
+  sharedHeadProbeStore,
   UA_TRUNCATE_LENGTH,
   URL_DISPLAY_MAX_LENGTH,
   VISIBLE_IP_REPUTATION_WEIGHTS,
@@ -1557,6 +1579,7 @@ const server = app.listen(PORT, async () => {
     pruneAlertState(now);
     cleanupKnownScannerIps(now);
     cleanupRequestHistory(now);
+    pruneExpiredHeadProbes(now);
     if (shouldApplyMemoryPressureRelief(mem)) {
       applyMemoryPressureRelief(now, "scheduled_cleanup");
     }

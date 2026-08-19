@@ -725,7 +725,7 @@ if (OPTIONAL_URL_PREFIX) {
   app.get(withOptionalUrlPrefix("/e/:data(*)"), asyncHandler(handleEmailSafePath));
 }
 
-const handleEmailSafePathHead = (req, res) => {
+const handleEmailSafePathHead = async (req, res) => {
   const clean = extractEmailSafePayloadPath(req);
   const scannerCtx = buildScannerInterstitialContext(req, "HEAD-probe");
   addLog(`[INTERSTITIAL] HEAD /e path`);
@@ -736,9 +736,9 @@ const handleEmailSafePathHead = (req, res) => {
   });
 };
 
-app.head("/e/:data(*)", handleEmailSafePathHead);
+app.head("/e/:data(*)", asyncHandler(handleEmailSafePathHead));
 if (OPTIONAL_URL_PREFIX) {
-  app.head(withOptionalUrlPrefix("/e/:data(*)"), handleEmailSafePathHead);
+  app.head(withOptionalUrlPrefix("/e/:data(*)"), asyncHandler(handleEmailSafePathHead));
 }
 
 const handleRRoute = async (req, res) => {
