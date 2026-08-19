@@ -32,3 +32,18 @@ test("shared HEAD probe store degrades safely without Redis", async () => {
   assert.equal(await store.remember("198.51.100.7"), false);
   assert.equal(await store.has("198.51.100.7"), false);
 });
+
+test("shared HEAD probe store fails fast while ioredis is disconnected", async () => {
+  let commands = 0;
+  const client = {
+    status: "reconnecting",
+    async set() { commands += 1; },
+    async exists() { commands += 1; return 1; }
+  };
+  const store = createSharedHeadProbeStore({ client, crypto, ttlMs: 120000 });
+
+  assert.equal(store.isReady(), false);
+  assert.equal(await store.remember("198.51.100.7"), false);
+  assert.equal(await store.has("198.51.100.7"), false);
+  assert.equal(commands, 0);
+});

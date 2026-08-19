@@ -3,13 +3,20 @@
 function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanner:head-probe" }) {
   const enabled = !!client;
 
+  function isReady() {
+    // Test doubles and already-connected generic clients may not expose status.
+    // ioredis must be fully ready; do not queue request-path work while it is
+    // connecting, reconnecting, or closed.
+    return enabled && (client.status === undefined || client.status === "ready");
+  }
+
   function redisKey(identityKey) {
     const digest = crypto.createHash("sha256").update(String(identityKey || "unknown")).digest("hex");
     return `${keyPrefix}:${digest}`;
   }
 
   async function remember(identityKey) {
-    if (!enabled) return false;
+    if (!isReady()) return false;
     try {
       await client.set(redisKey(identityKey), "1", "PX", ttlMs);
       return true;
@@ -19,7 +26,7 @@ function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanne
   }
 
   async function has(identityKey) {
-    if (!enabled) return false;
+    if (!isReady()) return false;
     try {
       return (await client.exists(redisKey(identityKey))) === 1;
     } catch (_) {
@@ -27,7 +34,7 @@ function createSharedHeadProbeStore({ client, crypto, ttlMs, keyPrefix = "scanne
     }
   }
 
-  return { enabled, remember, has };
+  return { enabled, isReady, remember, has };
 }
 
 module.exports = createSharedHeadProbeStore;

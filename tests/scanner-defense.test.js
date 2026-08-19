@@ -1188,3 +1188,16 @@ test('HEAD safety-lane responses set explicit head-probe reason headers', () => 
   assert.match(catchAllHeadSource, /req\.method === "HEAD"/);
   assert.match(catchAllHeadSource, /sendScannerSafetyLaneHeadResponse\(req, res, clean, "HEAD-probe"/);
 });
+
+test('credential-bearing GETs bypass headerless scanner suppression', () => {
+  const source = fs.readFileSync('modules/redirect-core/redirectCore.js', 'utf8');
+  const helperStart = source.indexOf('async function isRecentHeaderlessScannerGet');
+  const helperEnd = source.indexOf('\nfunction sendHeaderlessScannerFollowupResponse', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  const credentialCheck = helper.indexOf('req.query.cft');
+  const presentationCheck = helper.indexOf('req.get("user-agent")');
+  assert.ok(credentialCheck >= 0, 'credential exemption should be present');
+  assert.ok(credentialCheck < presentationCheck, 'credential exemption must run before headerless classification');
+  assert.match(helper, /cf-turnstile-response/);
+});

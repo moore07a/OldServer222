@@ -176,6 +176,9 @@ async function rememberHeadProbe(req) {
 
 async function isRecentHeaderlessScannerGet(req) {
   if (req.method !== "GET") return false;
+  // Credential-bearing clients must reach Turnstile verification even when
+  // they omit browser presentation headers.
+  if ((req.query && req.query.cft) || req.get("cf-turnstile-response")) return false;
   if (req.get("user-agent") || req.get("accept-language") || req.get("accept")) return false;
   const key = headProbeKey(req);
   const seenAt = Number(RECENT_HEAD_PROBES.get(key) || 0);

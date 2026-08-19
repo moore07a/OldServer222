@@ -1072,6 +1072,7 @@ const scannerProbeRedis = scannerProbeRedisUrl
   ? new Redis(scannerProbeRedisUrl, {
       commandTimeout: 500,
       connectTimeout: 1000,
+      enableOfflineQueue: false,
       maxRetriesPerRequest: 1,
       retryStrategy: (attempt) => Math.min(attempt * 100, 1000)
     })
