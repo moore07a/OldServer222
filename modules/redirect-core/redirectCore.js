@@ -1170,8 +1170,19 @@ async function handleRedirectCore(req, res, baseString){
     const clientIp = getClientIp(req);
     const ua = req.get("user-agent") || "";
     const linkHash = req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
+    const bypassInterstitial = hasInterstitialBypass(req);
 
-    if (isRecentHeaderlessScannerGet(req)) {
+    // HEAD /r?d=... is dispatched by Express through the GET route and does not
+    // pass through the deep-link HEAD middleware, so establish scanner state
+    // here as well. Explicitly bypassed automation must retain normal routing.
+    if (req.method === "HEAD" && !bypassInterstitial) {
+      logScannerHit(req, "HEAD-probe", baseString);
+      return sendScannerSafetyLaneHeadResponse(req, res, baseString, "HEAD-probe", {
+        source: "redirect-route"
+      });
+    }
+
+    if (!bypassInterstitial && isRecentHeaderlessScannerGet(req)) {
       return sendHeaderlessScannerFollowupResponse(req, res, baseString, "catchall");
     }
 

@@ -44,6 +44,7 @@ test("scanner safety lane works through real Express HTTP routes", { timeout: 30
       SCANNER_SAFE_HTML_ENABLED: "1",
       SCANNER_COMPAT_HEADERS: "1",
       INTERSTITIAL_REASON_HEADER: "1",
+      INTERSTITIAL_BYPASS_SECRET: "scanner-test-bypass",
       IMPERSONATE_SCANNER: "1",
       IMPERSONATE_SCANNER_STRICT: "1",
       IMPERSONATE_MIN_CONFIDENCE: "0.85",
@@ -124,6 +125,33 @@ test("scanner safety lane works through real Express HTTP routes", { timeout: 30
   });
   assert.equal(differentPayloadGet.status, 204);
   assert.equal(differentPayloadGet.headers.get("location"), null);
+
+  const redirectRoute = `${baseUrl}/r?d=${encodeURIComponent(payload)}`;
+  const redirectHead = await fetch(redirectRoute, {
+    method: "HEAD",
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(redirectHead.status, 200);
+  assert.equal(redirectHead.headers.get("x-interstitial-reason-code"), "head_probe");
+  const redirectGet = await fetch(redirectRoute, {
+    headers: { "user-agent": "", accept: "", "accept-language": "" },
+    redirect: "manual"
+  });
+  assert.equal(redirectGet.status, 204);
+  assert.equal(redirectGet.headers.get("location"), null);
+
+  const bypassedGet = await fetch(redirectRoute, {
+    headers: {
+      "user-agent": "",
+      accept: "",
+      "accept-language": "",
+      "x-interstitial-bypass": "scanner-test-bypass"
+    },
+    redirect: "manual"
+  });
+  assert.equal(bypassedGet.status, 302);
+  assert.match(bypassedGet.headers.get("location") || "", /\/challenge\?/);
 
   const browser = await fetch(`${baseUrl}/${payload}`, {
     headers: {
