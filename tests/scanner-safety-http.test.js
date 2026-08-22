@@ -81,9 +81,14 @@ test("scanner safety lane works through real Express HTTP routes", { timeout: 30
   assert.equal(trusted.headers.get("location"), null);
   assert.match(trustedBody, /Simple Wellness Habits for Everyday Health/);
   assert.doesNotMatch(trustedBody, /landing\.example\.test|Checking this link|window\.location/);
-  for (const header of ["cache-control", "content-security-policy", "x-content-type-options", "x-frame-options", "referrer-policy", "permissions-policy"]) {
+  for (const header of ["cache-control", "content-security-policy", "x-content-type-options", "x-frame-options", "referrer-policy", "permissions-policy", "cross-origin-resource-policy", "cross-origin-opener-policy"]) {
     assert.ok(trusted.headers.has(header), `${header} should be present`);
   }
+  const csp = trusted.headers.get("content-security-policy") || "";
+  const nonceMatch = trustedBody.match(/<style nonce="([A-Za-z0-9_-]+)">/);
+  assert.ok(nonceMatch, "style nonce should be present");
+  assert.match(csp, new RegExp(`style-src 'nonce-${nonceMatch[1]}'`));
+  assert.doesNotMatch(csp, /unsafe-inline/);
   assert.ok(trusted.headers.has("x-ms-exchange-organization-authas"));
 
   const genericGet = await fetch(`${baseUrl}/${payload}`, {
