@@ -1,5 +1,7 @@
 "use strict";
 
+const buildScannerSafeHealthHtml = require("./buildScannerSafeHealthHtml.js");
+
 function createScannerDetection(dependencies) {
   const {
     LOGS,
@@ -246,79 +248,6 @@ function getScannerResponseHeader(headers, headerName) {
   return null;
 }
 
-function buildScannerSafeHealthTipsHtml() {
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Simple Wellness Habits for Everyday Health</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root{color-scheme:light;--bg:#f5f7f4;--card:#fff;--text:#1f2933;--muted:#52616b;--accent:#2f7d58;--border:#dfe7dd;}
-    *{box-sizing:border-box;}
-    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;}
-    .page{max-width:880px;margin:0 auto;padding:32px 18px;}
-    header,article,footer{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:0 2px 10px rgba(31,41,51,.06);}
-    header{padding:28px 30px;margin-bottom:18px;}
-    article{padding:8px 30px 26px;}
-    footer{margin-top:18px;padding:16px 30px;color:var(--muted);font-size:.92rem;}
-    h1{margin:0 0 10px;color:var(--accent);font-size:2rem;line-height:1.2;}
-    h2{margin:24px 0 8px;font-size:1.15rem;color:#20362b;}
-    p{margin:0 0 12px;}
-    .summary{color:var(--muted);max-width:680px;}
-    .meta{font-size:.9rem;color:var(--muted);}
-    ul{padding-left:1.25rem;margin:8px 0 0;}
-    li{margin:6px 0;}
-  </style>
-</head>
-<body>
-  <main class="page">
-    <header>
-      <p class="meta">General wellness information</p>
-      <h1>Simple Wellness Habits for Everyday Health</h1>
-      <p class="summary">Small daily routines can support energy, focus, and general well-being. These practical reminders are intended for everyday lifestyle awareness.</p>
-    </header>
-    <article aria-label="Daily wellness guide">
-      <section>
-        <h2>Hydration</h2>
-        <p>Keep water nearby during the day and consider starting the morning with a glass of water before caffeinated drinks.</p>
-      </section>
-      <section>
-        <h2>Movement</h2>
-        <p>Short walking or stretching breaks can help reduce stiffness during long periods of sitting.</p>
-      </section>
-      <section>
-        <h2>Balanced Meals</h2>
-        <p>A simple plate with vegetables, whole grains, and protein can make everyday meals more satisfying.</p>
-      </section>
-      <section>
-        <h2>Sleep Routine</h2>
-        <p>Consistent sleep and wake times, a quiet room, and reduced screen use before bed can support better rest.</p>
-      </section>
-      <section>
-        <h2>Stress Management</h2>
-        <p>Brief breathing breaks, journaling, or a few quiet minutes can make it easier to reset during a busy day.</p>
-      </section>
-      <section>
-        <h2>Quick Daily Checklist</h2>
-        <ul>
-          <li>Drink water regularly.</li>
-          <li>Take short movement breaks.</li>
-          <li>Choose balanced meals when possible.</li>
-          <li>Keep a consistent sleep routine.</li>
-          <li>Pause for a few calm minutes when needed.</li>
-        </ul>
-      </section>
-    </article>
-    <footer>
-      <p>This page provides general lifestyle information only and is not a substitute for professional medical advice.</p>
-    </footer>
-  </main>
-</body>
-</html>`;
-}
-
 function resolveScannerProfile(req, explicitProfile = null) {
   let profile = explicitProfile || null;
   const ua = req.get("User-Agent") || "";
@@ -336,16 +265,18 @@ function resolveScannerProfile(req, explicitProfile = null) {
   return profile || SCANNER_GENERIC_PROFILE;
 }
 
-function applyScannerSafeHtmlHeaders(res) {
+function applyScannerSafeHtmlHeaders(res, styleNonce) {
   if (!res || typeof res.setHeader !== "function") return;
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.setHeader("X-" + "Content-Type-Options", SECURITY_HEADER_VALUES.contentTypeOptions);
   res.setHeader("Referrer-Policy", SECURITY_HEADER_VALUES.referrerPolicy);
   res.setHeader("X-Frame-Options", SECURITY_HEADER_VALUES.frameOptions || "DENY");
   res.setHeader("Permissions-Policy", SECURITY_HEADER_VALUES.privacyPermissions || "geolocation=(), microphone=(), camera=()");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+    `default-src 'none'; style-src 'nonce-${styleNonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
   );
 }
 
@@ -371,14 +302,15 @@ async function renderScannerSafeHtmlForScanner(req, res, decryptResult) {
   // scanner requests receive harmless static HTML after the same URL validation used
   // by normal redirects has already run in handleRedirectCore.
   const profile = resolveScannerProfile(req, decryptResult && decryptResult.scannerProfile);
+  const styleNonce = crypto.randomBytes(18).toString("base64url");
 
   // Apply scanner compatibility/profile headers and static-page security headers.
   applyScannerCompatHeaders(res);
   applyScannerProfileHeaders(res, profile);
-  applyScannerSafeHtmlHeaders(res);
+  applyScannerSafeHtmlHeaders(res, styleNonce);
 
   // Send the health tips page with 200 OK
-  res.status(200).type('html').send(buildScannerSafeHealthTipsHtml());
+  res.status(200).set("Content-Type", "text/html; charset=utf-8").send(buildScannerSafeHealthHtml(styleNonce));
 
   const logFields = getScannerSafeHtmlLogFields(decryptResult || {}, profile);
   addLog(`[SCANNER_SAFE_HTML] served health tips mode=${logFields.mode} host=${logFields.host} linkHash=${logFields.linkHash} profile=${logFields.profile}`);
