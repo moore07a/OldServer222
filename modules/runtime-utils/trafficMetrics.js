@@ -1,6 +1,7 @@
 "use strict";
 
 const { performance } = require("node:perf_hooks");
+const createRetiredLogPolicy = require("./retiredLogPolicy.js");
 
 const SAMPLE_LIMIT = 512;
 const KINDS = ["operational", "head", "prefetch", "get", "other"];
@@ -9,14 +10,14 @@ const CHALLENGE_EVENTS = ["shown", "passed", "failed", "expired", "expiredOrDupl
 const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug"];
 const OPERATIONAL_PATHS = [
   "/health", "/readyz", "/healthz", "/livez",
-  "/stream-log", "/view-log", "/view-log-live", "/geo-debug",
+  "/geo-debug",
   "/robots.txt", "/sitemap.xml", "/favicon.ico",
   "/ads.txt", "/.well-known/security.txt",
   "/ts-client-log", "/turnstile-sitekey", "/api/v1/status",
   "/_collect", "/_interact", "/_analytics.gif", "/__hp.gif"
 ];
 
-function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => performance.now(), onRequest = () => {}, onChallengeEvent = () => {} } = {}) {
+function createTrafficMetrics({ pathMatchesWithOptionalPrefix, isRetiredLogPath = createRetiredLogPolicy(), now = () => performance.now(), onRequest = () => {}, onChallengeEvent = () => {} } = {}) {
   const startedAt = new Date().toISOString();
   const matchesPath = pathMatchesWithOptionalPrefix || ((pathValue, expected, { allowChildren }) => (
     pathValue === expected || (allowChildren && pathValue.startsWith(`${expected}/`))
@@ -51,6 +52,7 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
     const pathValue = String(req.path || req.originalUrl || req.url || "/")
       .split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
     if (
+      isRetiredLogPath(pathValue) ||
       OPERATIONAL_PATHS.some((expected) => matchesPath(pathValue, expected, { allowChildren: false })) ||
       OPERATIONAL_SUBTREES.some((expected) => matchesPath(pathValue, expected, { allowChildren: true }))
     ) return "operational";

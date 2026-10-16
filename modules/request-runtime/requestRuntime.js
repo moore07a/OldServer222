@@ -252,9 +252,6 @@ function shouldTrackRuntimeRequest(req) {
   if (
     isOperationalBypassPath(pathValue) ||
     isLikelyScannerProbePath(pathValue) ||
-    pathMatchesWithOptionalPrefix(pathValue, '/stream-log', { allowChildren: false }) ||
-    pathMatchesWithOptionalPrefix(pathValue, '/view-log', { allowChildren: false }) ||
-    pathMatchesWithOptionalPrefix(pathValue, '/view-log-live', { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(pathValue, '/geo-debug', { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(pathValue, '/ts-client-log', { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(pathValue, '/interstitial-human', { allowChildren: false }) ||

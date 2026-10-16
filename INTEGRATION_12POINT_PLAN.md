@@ -5,7 +5,8 @@ This project now includes runtime support for the reliability hardening plan dis
 ## Implementation status
 
 1. ✅ **Dedicated lightweight health endpoint**
-   - `/healthz` (liveness) and `/health`/`/readyz` (full status) are present.
+   - `/healthz` and `/livez` (liveness) and `/health`/`/readyz` (full status) are present, including optional-prefix variants.
+   - The dependency health checker and `[HEALTH] heartbeat` logging remain active independently of the retired log stream.
 
 2. ✅ **Request lifecycle logging middleware**
    - Runtime accounting tracks in-flight, completed, aborted requests.
@@ -17,7 +18,8 @@ This project now includes runtime support for the reliability hardening plan dis
 
 4. ✅ **Bounded admin monitoring**
    - `/admin/traffic-panel` polls the authenticated metrics API with one request at a time, hidden-tab pauses, timeouts, and backoff.
-   - Legacy viewers redirect to the panel; `/stream-log` returns 204 and allocates no streaming resources.
+   - `/view-log`, `/view-log-live`, and `/stream-log` are retired with finite 404 responses for all methods, including mixed-case, optional-prefix, and child paths, before redirect processing. Configured namespaces take precedence when their prefix overlaps an old name.
+   - Raw details remain available in server stdout/file logs and authenticated diagnostic APIs; the panel displays aggregate metrics.
 
 5. ✅ **Graceful shutdown on SIGTERM/SIGINT**
    - Process signal handlers call `gracefulShutdown(...)`.

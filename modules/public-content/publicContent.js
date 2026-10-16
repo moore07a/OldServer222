@@ -616,8 +616,10 @@ function shouldHandleAsDynamicPublicPath(req) {
     '/challenge',
     '/ts-client-log',
     '/interstitial-human',
+    // Retired log names stay reserved even though the server rejects them early.
     '/stream-log',
     '/view-log',
+    '/view-log-live',
     '/__debug',
     '/admin',
     '/health',

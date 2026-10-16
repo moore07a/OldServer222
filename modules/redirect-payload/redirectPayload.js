@@ -1007,7 +1007,7 @@ function validateRedirectRequest(req, res, next) {
   const exactSkipPaths = [
     "/health", "/healthz", "/readyz", "/livez", "/geo-debug",
     "/favicon.ico", "/robots.txt", "/.well-known/security.txt", "/turnstile-sitekey", "/__hp.gif",
-    "/decrypt-challenge-data", "/view-log-live",
+    "/decrypt-challenge-data",
     "/about", "/services", "/docs", "/status", "/contact",
     "/sitemap.xml", "/api/v1/status"
   ];
@@ -1015,7 +1015,7 @@ function validateRedirectRequest(req, res, next) {
     "/health", "/healthz", "/readyz", "/livez", "/decrypt-challenge-data"
   ];
   const prefixedSkipPaths = [
-    "/view-log", "/stream-log", "/admin", "/__debug", "/_debug",
+    "/admin", "/__debug", "/_debug",
     "/challenge", "/challenge-fragment", "/ts-client-log", "/interstitial-human"
   ];
 

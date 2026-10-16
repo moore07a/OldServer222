@@ -591,13 +591,12 @@ app.use((req, res, next) => {
   Promise.resolve((async () => {
   if (hasInterstitialBypass(req)) return next();
 
-  // allow your own health, logs, and challenge endpoints through
+  // allow your own health and challenge endpoints through
   if (
     pathMatchesWithOptionalPrefix(req.path, "/health", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/healthz", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/readyz", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/livez", { allowChildren: false }) ||
-    req.path.startsWith("/view-log") ||
     pathMatchesWithOptionalPrefix(req.path, "/challenge") ||
     pathMatchesWithOptionalPrefix(req.path, "/ts-client-log", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/interstitial-human", { allowChildren: false })
@@ -669,7 +668,6 @@ app.use((req, res, next) => {
     pathMatchesWithOptionalPrefix(req.path, "/health", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/healthz", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/readyz", { allowChildren: false }) ||
-    req.path.startsWith("/view-log") ||
     pathMatchesWithOptionalPrefix(req.path, "/challenge") ||
     pathMatchesWithOptionalPrefix(req.path, "/ts-client-log", { allowChildren: false }) ||
     pathMatchesWithOptionalPrefix(req.path, "/interstitial-human", { allowChildren: false })

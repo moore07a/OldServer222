@@ -213,7 +213,7 @@ const CRAWLER_PUBLIC_WALK_IP_HISTORY = new Map();
 const CRAWLER_PUBLIC_WALK_IP_DENY_CACHE = new Map();
 
 const UNKNOWN_SCANNER_SKIP_PREFIXES = [
-  "/health", "/healthz", "/readyz", "/livez", "/admin", "/view-log", "/stream-log",
+  "/health", "/healthz", "/readyz", "/livez", "/admin",
   "/challenge", "/challenge-fragment", "/ts-client-log", "/turnstile-sitekey",
   "/e", "/favicon.ico", "/robots.txt", "/sitemap.xml", "/__hp.gif"
 ];
