@@ -24,7 +24,6 @@ const LOG_FILE      = process.env.LOG_FILE || path.join(process.cwd(), "visitors
 const LOG_FILE_MAX_BYTES = readPositiveIntEnv("LOG_FILE_MAX_BYTES", 50 * 1024 * 1024);
 const LOG_FILE_MAX_FILES = Math.min(100, readPositiveIntEnv("LOG_FILE_MAX_FILES", 5));
 const MAX_LOG_LINES = readPositiveIntEnv("MAX_LOG_LINES", 2000);
-const BACKLOG_ON_CONNECT = parseInt(process.env.BACKLOG_ON_CONNECT || "200", 10);
 const RUNTIME_DIAG_DIR = process.env.RUNTIME_DIAG_DIR || process.env.LOG_DIR || path.join(process.cwd(), "runtime-diagnostics");
 const RUNTIME_INCIDENT_FILE = process.env.RUNTIME_INCIDENT_FILE || path.join(RUNTIME_DIAG_DIR, "incidents.ndjson");
 const NPM_DEBUG_LOG_DIR = process.env.NPM_CONFIG_LOGS_DIR || path.join(os.homedir(), ".npm", "_logs");
@@ -92,7 +91,6 @@ function formatRuntimeCorrelationSuffix() {
 const LOGS = [];
 const LOG_IDS = [];
 let LOG_SEQ = 0;
-const LOG_LISTENERS = new Set();
 let logFileWriteErrorAt = 0;
 let logFileDropWarnAt = 0;
 const LOG_FILE_QUEUE_MAX_LINES = Math.max(500, parseInt(process.env.LOG_FILE_QUEUE_MAX_LINES || "5000", 10));
@@ -114,14 +112,14 @@ let logFileRotations = 0;
 const LOG_FILE_RETRY_DELAY_MS = Math.max(250, parseInt(process.env.LOG_FILE_RETRY_DELAY_MS || "1000", 10));
 
 const OPEN_SOCKETS_WARN_THRESHOLD = Math.max(50, parseInt(process.env.OPEN_SOCKETS_WARN_THRESHOLD || "400", 10));
-const SSE_LISTENERS_WARN_THRESHOLD = Math.max(10, parseInt(process.env.SSE_LISTENERS_WARN_THRESHOLD || "120", 10));
 const LOG_FILE_QUEUE_WARN_BYTES = Math.max(128 * 1024, parseInt(process.env.LOG_FILE_QUEUE_WARN_BYTES || String(1024 * 1024), 10));
 let lastRuntimeGaugeAlertAt = 0;
 
 function getRuntimeResourceGauges() {
   return {
     openSockets: typeof openSockets === "object" && openSockets ? openSockets.size : 0,
-    sseListeners: LOG_LISTENERS.size,
+    // Retain the diagnostic field for existing health consumers after retiring SSE.
+    sseListeners: 0,
     logFileQueueLines: logFileQueue.length,
     logFileQueueBytes,
     logFileDroppedLines,
@@ -145,9 +143,6 @@ function maybeEmitRuntimeGaugeAlerts(now = Date.now()) {
 
   if (gauges.openSockets >= OPEN_SOCKETS_WARN_THRESHOLD) {
     alerts.push(`openSockets=${gauges.openSockets}>=${OPEN_SOCKETS_WARN_THRESHOLD}`);
-  }
-  if (gauges.sseListeners >= SSE_LISTENERS_WARN_THRESHOLD) {
-    alerts.push(`sseListeners=${gauges.sseListeners}>=${SSE_LISTENERS_WARN_THRESHOLD}`);
   }
   if (gauges.logFileQueueBytes >= LOG_FILE_QUEUE_WARN_BYTES) {
     alerts.push(`logQueueBytes=${gauges.logFileQueueBytes}>=${LOG_FILE_QUEUE_WARN_BYTES}`);
@@ -709,20 +704,6 @@ function flushAggregatedLogs(now = Date.now()) {
   }
 }
 
-function sseSend(res, text, id) {
-  if (id != null) res.write(`id: ${id}\n`);
-  String(text).split(/\r?\n/).forEach(line => {
-    res.write(`data: ${line}\n`);
-  });
-  res.write('\n');
-}
-
-function broadcastLog(line, id) {
-  for (const res of LOG_LISTENERS) {
-    try { sseSend(res, line, id); } catch {}
-  }
-}
-
 function appendInMemoryLog(entry, id) {
   LOGS.push(entry);
   LOG_IDS.push(id);
@@ -826,19 +807,17 @@ function addLog(message) {
 
     appendInMemoryLog(entry, id);
 
-    broadcastLog(entry, id);
     appendLogFileLine(entry + "\n");
   }
 }
 
 function addSpacer() {
-  // Keep the in-memory/file/SSE spacer, but avoid emitting empty stdout lines.
+  // Keep the in-memory/file spacer, but avoid emitting empty stdout lines.
   // Some platform log viewers render empty stdout writes as standalone `[inf]`
   // rows, which makes exported logs look concatenated or duplicated.
   const id = ++LOG_SEQ;
   appendInMemoryLog("", id);
   appendLogFileLine("\n");
-  broadcastLog("", id);
 }
 
 
@@ -847,7 +826,6 @@ function addSpacer() {
     LOG_FILE,
     LOG_FILE_MAX_BYTES,
     LOG_FILE_MAX_FILES,
-    BACKLOG_ON_CONNECT,
     RUNTIME_INCIDENT_FILE,
     NPM_DEBUG_LOG_DIR,
     formatRailwayRuntimeLine,
@@ -855,7 +833,6 @@ function addSpacer() {
     formatRuntimeCorrelationSuffix,
     LOGS,
     LOG_IDS,
-    LOG_LISTENERS,
     getRuntimeResourceGauges,
     maybeEmitRuntimeGaugeAlerts,
     getProcessRuntimeMetadata,
@@ -868,7 +845,6 @@ function addSpacer() {
     AGG_FLUSH_MS,
     aggregatePerIpEvent,
     flushAggregatedLogs,
-    sseSend,
     analyzeLogIntegrity,
     addLog,
     addSpacer

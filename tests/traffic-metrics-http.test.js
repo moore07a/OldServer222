@@ -157,4 +157,39 @@ test('private traffic metrics include early responses and separate HTTP request 
   assert.equal(outcomes.payloadExpired, 1);
   assert.equal(outcomes.passed, 0);
   assert.equal(outcomes.redirected, 0);
+
+  for (const prefix of ['', '/campaign']) {
+    const panel = await request(`${prefix}/admin/traffic-panel`);
+    assert.equal(panel.response.status, 200, 'the panel login shell is available without exposing metrics');
+    assert.match(panel.response.headers.get('cache-control'), /no-store/);
+    assert.match(panel.text, /type="password"/);
+    assert.match(panel.text, /data-metrics-url="\/campaign\/admin\/traffic-metrics"/);
+    const nonce = panel.text.match(/<style nonce="([^"]+)"/)[1];
+    const csp = panel.response.headers.get('content-security-policy');
+    assert.ok(csp.includes(`style-src 'nonce-${nonce}'`));
+    assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+    assert.doesNotMatch(panel.text, new RegExp(adminToken));
+
+    const script = await request(`${prefix}/admin/traffic-panel.js`);
+    assert.equal(script.response.status, 200);
+    assert.match(script.response.headers.get('content-type'), /javascript/);
+    assert.match(script.text, /function createTrafficPanelController/);
+    assert.doesNotMatch(script.text, /EventSource|localStorage|sessionStorage/);
+
+    for (const legacy of ['/view-log', '/view-log-live']) {
+      const retired = await request(`${prefix}${legacy}?token=legacy-secret`);
+      assert.equal(retired.response.status, 302);
+      assert.equal(retired.response.headers.get('location'), '/campaign/admin/traffic-panel');
+      assert.doesNotMatch(retired.text, /legacy-secret|event-stream/);
+    }
+    const retiredStream = await request(`${prefix}/stream-log?token=legacy-secret`);
+    assert.equal(retiredStream.response.status, 204, 'EventSource receives a finite response that stops retries');
+    assert.equal(retiredStream.text, '');
+    assert.doesNotMatch(retiredStream.response.headers.get('content-type') || '', /event-stream/);
+  }
+  assert.equal((await request('/admin/traffic-metrics?token=legacy-secret')).response.status, 401);
+  const resources = JSON.parse((await request('/admin/traffic-metrics', authenticated)).text).runtime;
+  assert.ok(resources.memory.rssMb > 0);
+  assert.ok(resources.memory.heapUsedMb > 0);
+  assert.equal(resources.resources.sseListeners, 0);
 });

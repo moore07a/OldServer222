@@ -5,13 +5,11 @@ function createCoreRoutes(dependencies) {
     ACTIVE_REQUEST_DUMP_LIMIT,
     ACTIVE_REQUEST_TOP_PATH_LIMIT,
     AES_KEYS,
-    BACKLOG_ON_CONNECT,
     DEBUG_ALLOW_PLAINTEXT_KEYS,
     EXPECT_HOSTNAME_PATTERNS,
     LOGS,
     LOG_FILE,
     LOG_IDS,
-    LOG_LISTENERS,
     LOG_TO_FILE,
     MAX_CATCHALL_CONCURRENCY,
     NPM_DEBUG_LOG_DIR,
@@ -81,7 +79,6 @@ function createCoreRoutes(dependencies) {
     markInterstitialHuman,
     mask,
     maybeDenyForVisibleIpReputation,
-    mintEphemeralToken,
     net,
     path,
     readLogFileTail,
@@ -104,7 +101,6 @@ function createCoreRoutes(dependencies) {
     servePublicPathResponse,
     shouldHandleAsDynamicPublicPath,
     shouldTrackRuntimeRequest,
-    sseSend,
     stripOptionalUrlPrefix,
     summarizeError,
     tryDecryptAny,
@@ -311,8 +307,15 @@ if (OPTIONAL_URL_PREFIX) {
 const handleTrafficMetrics = async (_req, res, next) => {
   try {
     const shared = await getSharedTrafficMetricsSnapshot();
+    const usage = getRuntimeUsageSnapshot();
     res.setHeader("Cache-Control", "private, no-store");
-    return res.json({ ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus() });
+    return res.json({
+      ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus(),
+      runtime: {
+        uptimeSec: Math.floor(process.uptime()), memory: usage.memory,
+        resources: getRuntimeResourceGauges(), inFlightRequests: getTrackedInFlightCount()
+      }
+    });
   } catch (error) {
     return next(error);
   }
@@ -321,6 +324,9 @@ app.get("/admin/traffic-metrics", requireAdmin, handleTrafficMetrics);
 if (OPTIONAL_URL_PREFIX) {
   app.get(withOptionalUrlPrefix("/admin/traffic-metrics"), requireAdmin, handleTrafficMetrics);
 }
+
+const registerTrafficPanelRoutes = require("../admin-panel/registerTrafficPanelRoutes.js");
+registerTrafficPanelRoutes({ app, withOptionalUrlPrefix, optionalPrefix: OPTIONAL_URL_PREFIX });
 
 const handleTsClientLog = (req, res) => {
     const ip  = getClientIp(req) || "unknown";
@@ -400,127 +406,6 @@ app.post(
 if (OPTIONAL_URL_PREFIX) {
   app.post(withOptionalUrlPrefix("/interstitial-human"), express.json({ type: "application/json", limit: "4kb" }), handleInterstitialHuman);
 }
-
-const handleStreamLog = (req, res) => {
-  if (!isAdminSSE(req)) return res.status(403).end("Forbidden: missing admin token (SSE)");
-
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders?.();
-
-  try { res.write(": connected\n\n"); } catch {}
-
-  const lastIdHdr = req.get("last-event-id");
-  const lastId = lastIdHdr ? parseInt(lastIdHdr, 10) : NaN;
-  let startIdx = Math.max(0, LOG_IDS.length - BACKLOG_ON_CONNECT);
-  if (Number.isFinite(lastId) && lastId >= 0) {
-    const pos = LOG_IDS.lastIndexOf(lastId);
-    if (pos >= 0) startIdx = pos + 1;
-  } else {
-    res.write(`event: reset\ndata: {"ts":${Date.now()}}\n\n`);
-  }
-
-  for (let i = startIdx; i < LOGS.length; i++) {
-    sseSend(res, LOGS[i], LOG_IDS[i]);
-  }
-
-  LOG_LISTENERS.add(res);
-
-  try { res.write(": hb-ready\n\n"); } catch {}
-
-  const hb = setInterval(() => { try { res.write(": ping\n\n"); } catch {} }, 25000);
-  if (typeof hb.unref === "function") hb.unref();
-
-  let cleaned = false;
-  function cleanup() {
-    if (cleaned) return;
-    cleaned = true;
-    try { clearInterval(hb); } catch {}
-    LOG_LISTENERS.delete(res);
-  }
-
-  req.once("aborted", cleanup);
-  req.once("close", cleanup);
-  res.once("close", cleanup);
-  res.once("error", cleanup);
-  res.once("finish", cleanup);
-
-  req.socket?.setTimeout?.(0);
-  req.socket?.setKeepAlive?.(true);
-};
-
-app.get("/stream-log", handleStreamLog);
-if (OPTIONAL_URL_PREFIX) {
-  app.get(withOptionalUrlPrefix("/stream-log"), handleStreamLog);
-}
-
-app.get("/view-log-live", (req, res) => {
-  if (!(isAdmin(req) || isAdminSSE(req))) {
-    return res.status(401).type("text/plain").send("Unauthorized");
-  }
-
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader(
-    "Content-Security-Policy",
-    "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
-  );
-
-  const pageTok = req.query.token && String(req.query.token);
-  const tok = pageTok || mintEphemeralToken();
-  const streamUrl = `/stream-log?token=${encodeURIComponent(tok)}`;
-
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="referrer" content="no-referrer" />
-  <meta name="color-scheme" content="dark light" />
-  <title>Live Logs</title>
-  <style>
-    body{margin:0;font:14px/1.4 ui-monospace,Menlo,Consolas,monospace}
-    #log{padding:12px;white-space:pre-wrap;word-break:break-word}
-    .status{color:#888;padding:8px 12px}
-  </style>
-</head>
-<body>
-  <div class="status">Connecting…</div>
-  <pre id="log"></pre>
-  <script>
-    const logEl = document.getElementById('log');
-    const statusEl = document.querySelector('.status');
-    const es = new EventSource(${JSON.stringify(streamUrl)});
-
-    es.onopen = () => {
-      statusEl.textContent = 'Connected';
-    };
-
-    es.addEventListener('reset', () => {
-      logEl.textContent = '';
-      statusEl.textContent = 'Repainting…';
-    });
-
-    es.onmessage = (e) => {
-      logEl.textContent += e.data + '\\n';
-      statusEl.textContent = '';
-      window.scrollTo(0, document.body.scrollHeight);
-    };
-
-    es.onerror = (e) => {
-      statusEl.textContent = 'Disconnected — retrying…';
-      console.debug('SSE error', e, 'readyState=', es.readyState);
-    };
-  </script>
-</body>
-</html>`);
-});
-
-app.get("/view-log", requireAdmin, (req, res) => {
-  return res.type("text/plain").send(LOGS.join("\n") || "No logs yet.");
-});
 
 app.get("/geo-debug", (req, res) => {
   if (!isAdmin(req)) return res.status(403).send("Forbidden");

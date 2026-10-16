@@ -4,7 +4,37 @@ The article's useful starting point is separating different kinds of traffic
 before changing protection rules. A request count alone cannot establish how
 many people visited, whether someone is a bot, or whether an ad converted.
 
-## Read the summary
+## Open the live panel
+
+Open `/admin/traffic-panel` on the deployed app, or its configured
+`OPTIONAL_URL_PREFIX` variant. The page initially shows a login shell with no
+traffic data. Enter the existing `ADMIN_TOKEN` to connect. The token is sent
+only in the API authorization header and is kept in this page's memory; it is
+not placed in URLs, cookies, local storage, or session storage. Disconnecting
+or reloading clears it.
+
+The panel refreshes every five seconds, schedules the next poll after the
+previous one settles, and limits each fetch and response body to eight seconds.
+Hidden tabs pause requests. Pause, disconnect, navigation, and reconnect cancel
+pending work; late responses cannot overwrite a newer session. Failed refreshes
+back off up to 60 seconds and mark the last report stale. Authentication
+rejection stops polling and clears the session. The chart retains at most 60
+numeric samples; the DOM does not grow with incoming traffic.
+
+Choose **Current process** or **Shared Redis totals** for the counters. Recent
+latency percentiles and runtime resources always describe the responding
+process and are labelled accordingly. Redis errors and pending observations
+remain visible so a connected socket is not mistaken for durable delivery.
+
+The old `/view-log` and `/view-log-live` URLs redirect to the panel without
+copying query tokens. `/stream-log` returns a finite HTTP 204 response, which
+tells EventSource clients to stop reconnecting. The standalone `live-log.html`
+viewer, log stream listeners, broadcasts, heartbeats, and backlog buffers have
+been removed. Stdout/file logging, bounded log history, crash incidents, health
+routes, and authenticated diagnostic APIs remain available. The compatibility
+health gauge `sseListeners` is always zero.
+
+## Read the JSON summary
 
 `GET /admin/traffic-metrics` requires the existing `Authorization: Bearer`
 admin token. It also works under `OPTIONAL_URL_PREFIX` when configured. The
@@ -17,8 +47,9 @@ curl --fail --silent --show-error \
 ```
 
 The JSON contains `scope: "current_process"`, `startedAt`, `total`, `byKind`,
-and `challenges`. It also includes `shared` Redis aggregates and `storage`
-status when persistence is configured. The fixed request groups are:
+and `challenges`. It also includes `shared` Redis aggregates, `storage` status,
+and current-process `runtime` memory and resource gauges. The fixed request
+groups are:
 
 | Group | Meaning |
 | --- | --- |
@@ -170,3 +201,54 @@ Those tests use a unique namespace and clean up only their own keys. Without
 that variable, the real-Redis tests are explicitly skipped. Mocked provider tests
 exercise verification outcomes without external requests; they do not verify
 live Cloudflare credentials or browser challenge completion.
+
+Additional panel checks:
+
+```bash
+# Requires Playwright and Chromium; uses a separate local fixture server.
+node tests/traffic-panel-browser.js --output /tmp/traffic-panel-browser.json
+
+# Five-minute local load check, including three simulated polling panels.
+node tests/traffic-panel-soak.js --duration-sec 300 --rps 30 --panels 3 \
+  --output /tmp/traffic-panel-soak.json
+
+# Optional 20-second Redis network outage during the same load test.
+TRAFFIC_METRICS_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+  node tests/traffic-panel-soak.js --duration-sec 300 --redis-outage-sec 20 \
+  --output /tmp/traffic-panel-outage-soak.json
+```
+
+The soak can also use `TRAFFIC_METRICS_TEST_REDIS_URL`. It launches its own
+isolated server with generated test credentials, exercises valid widget HTML
+responses, malformed redirect requests, slow readers, and deliberate client
+disconnects, then checks resource draining and runtime errors. The existing
+malformed-request limiter's 429 responses are counted separately as expected
+defensive responses. Reports never contain credentials or Redis URLs. A local
+run does not prove long-term leak freedom or cover the deployed proxy's 499
+behaviour; deliberate disconnections are reported separately.
+
+Outage injection requires an isolated local Redis fixture. A temporary TCP
+proxy owned by the test disconnects and reconnects the app; it never stops or
+reconfigures the supplied Redis service. The checks require the API to continue
+serving local metrics during the interruption, then recover shared totals and
+drain pending observations afterward.
+
+### Recorded panel validation
+
+The local validation on 2026-10-16 passed all 296 automated tests, including
+the real-Redis checks. Chromium passed 50 connect/disconnect cycles with
+34 event listeners before and after, at most one metrics request in flight,
+60 retained chart samples, and no uncaught browser or CSP errors.
+
+The five-minute run targeted 30 requests/second with three polling panels and
+a 20-second Redis outage. It completed 9,696 HTTP requests, 905 widget-fragment
+responses, 299 slow-reader checks, and 299 separate deliberate disconnects.
+There were no unexpected HTTP statuses, 5xx responses, network errors, request
+timeouts, uncaught exceptions, or unhandled rejections. Expected validation
+rate limits remained active. Local metrics stayed available during the outage;
+shared delivery recovered and pending observations drained afterward.
+
+Sampled RSS peaked at 189.69 MB and heap usage at 70.97 MB; the last-third heap
+floor was 1.69 MB above the first-third floor. After draining, tracked requests
+and log queue bytes were zero, with one remaining health-check connection.
+These are observations from a short local run, subject to the limits above.

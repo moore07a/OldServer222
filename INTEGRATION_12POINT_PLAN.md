@@ -13,10 +13,11 @@ This project now includes runtime support for the reliability hardening plan dis
 
 3. ✅ **Per-route metrics support**
    - Runtime status endpoint already exposes request counters and timing data.
-   - `stream-log` and health paths are explicitly classified for tracking decisions.
+   - Panel, admin API, retired log routes, and health requests are classified separately from ordinary GET traffic.
 
-4. ✅ **Streaming endpoint hardening**
-   - `/stream-log` exists as a first-class route and participates in early middleware/rate-limit flow.
+4. ✅ **Bounded admin monitoring**
+   - `/admin/traffic-panel` polls the authenticated metrics API with one request at a time, hidden-tab pauses, timeouts, and backoff.
+   - Legacy viewers redirect to the panel; `/stream-log` returns 204 and allocates no streaming resources.
 
 5. ✅ **Graceful shutdown on SIGTERM/SIGINT**
    - Process signal handlers call `gracefulShutdown(...)`.
@@ -44,7 +45,7 @@ This project now includes runtime support for the reliability hardening plan dis
    - Probe `/healthz` and `/` from at least 2 regions.
 
 ## Manual/external integrations (required outside this repo)
-   - Create per-route alerting for `/` vs `/stream-log`.
+   - Create per-route alerting for redirect traffic and `/admin/traffic-metrics` separately.
    - Suggested starter thresholds:
      - `/` p95 latency > 2s for 10m
      - `/` 5xx > 1% for 10m

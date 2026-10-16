@@ -783,7 +783,6 @@ const {
   LOG_FILE,
   LOG_FILE_MAX_BYTES,
   LOG_FILE_MAX_FILES,
-  BACKLOG_ON_CONNECT,
   RUNTIME_INCIDENT_FILE,
   NPM_DEBUG_LOG_DIR,
   formatRailwayRuntimeLine,
@@ -791,7 +790,6 @@ const {
   formatRuntimeCorrelationSuffix,
   LOGS,
   LOG_IDS,
-  LOG_LISTENERS,
   getRuntimeResourceGauges,
   maybeEmitRuntimeGaugeAlerts,
   getProcessRuntimeMetadata,
@@ -804,7 +802,6 @@ const {
   AGG_FLUSH_MS,
   aggregatePerIpEvent,
   flushAggregatedLogs,
-  sseSend,
   analyzeLogIntegrity,
   addLog,
   addSpacer,
@@ -1086,7 +1083,6 @@ const limitChallengeView = makeIpLimiter({
 
 const limitChallenge   = makeIpLimiter({ capacity: parseInt(process.env.CHALLENGE_CAPACITY || "12",10), windowSec: parseInt(process.env.CHALLENGE_WINDOW_SEC || "300",10), keyPrefix: "challenge" });
 const limitTsClientLog = makeIpLimiter({ capacity: parseInt(process.env.TSLOG_CAPACITY || "30",10),      windowSec: parseInt(process.env.TSLOG_WINDOW_SEC || "300",10),      keyPrefix: "tslog" });
-const limitSseUnauth   = makeIpLimiter({ capacity: parseInt(process.env.SSE_UNAUTH_CAPACITY || "10",10), windowSec: parseInt(process.env.SSE_UNAUTH_WINDOW_SEC || "60",10),  keyPrefix: "sse_unauth" });
 const validationFailureLimiter = makeIpLimiter({ capacity: 10, windowSec: 300, keyPrefix: "validation_fail" });
 
 const {
@@ -1234,7 +1230,7 @@ app.use(cors());
 app.use(express.json({ limit: "64kb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
-app.use(["/view-log", "/__debug", "/admin"], (req, res, next) => {
+app.use(["/__debug", "/admin"], (req, res, next) => {
   if (isAdmin(req) || isAdminSSE(req)) return next();
   const ip = getClientIp(req) || "unknown";
   const now = Date.now();
@@ -1362,10 +1358,6 @@ if (OPTIONAL_URL_PREFIX) {
   app.use(withOptionalUrlPrefix("/ts-client-log"), limitTsClientLog);
   app.use(withOptionalUrlPrefix("/interstitial-human"), limitTsClientLog);
 }
-app.use("/stream-log", (req, res, next) => {
-  if (isAdminSSE(req)) return next();
-  return limitSseUnauth(req, res, next);
-});
 
 // ✅ Put the debug route here (before your normal routes)
 if (process.env.IP_DEBUG === '1') {
@@ -1400,13 +1392,11 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   ACTIVE_REQUEST_DUMP_LIMIT,
   ACTIVE_REQUEST_TOP_PATH_LIMIT,
   AES_KEYS,
-  BACKLOG_ON_CONNECT,
   DEBUG_ALLOW_PLAINTEXT_KEYS,
   EXPECT_HOSTNAME_PATTERNS,
   LOGS,
   LOG_FILE,
   LOG_IDS,
-  LOG_LISTENERS,
   LOG_TO_FILE,
   MAX_CATCHALL_CONCURRENCY,
   NPM_DEBUG_LOG_DIR,
@@ -1498,7 +1488,6 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   servePublicPathResponse,
   shouldHandleAsDynamicPublicPath,
   shouldTrackRuntimeRequest,
-  sseSend,
   stripOptionalUrlPrefix,
   summarizeError,
   tryDecryptAny,
@@ -1735,7 +1724,7 @@ process.on("warning", (warning) => {
 
 const createProcessLifecycle = require("./modules/runtime-lifecycle/processLifecycle.js");
 const { gracefulShutdown, scheduleFatalExit } = createProcessLifecycle({
-  LOG_LISTENERS, SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
+  SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
   buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter, closeMetrics,
   formatRuntimeCorrelationSuffix, getProcessRuntimeMetadata,
   getRuntimeCorrelationMetadata, logActiveRequestDiagnostics, openSockets,

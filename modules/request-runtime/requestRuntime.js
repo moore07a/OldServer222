@@ -279,15 +279,8 @@ function shouldTrackRuntimeRequest(req) {
   return true;
 }
 
-function shouldEnforceRequestTimeout(req) {
-  const pathValueRaw = String(req && (req.path || req.originalUrl || req.url) || '/').split('?')[0].split('#')[0];
-  const pathValue = pathValueRaw.length > 1 ? pathValueRaw.replace(/\/+$/, '') : pathValueRaw;
-  if (
-    pathMatchesWithOptionalPrefix(pathValue, '/stream-log', { allowChildren: false }) ||
-    pathMatchesWithOptionalPrefix(pathValue, '/view-log-live', { allowChildren: false })
-  ) {
-    return false;
-  }
+function shouldEnforceRequestTimeout() {
+  // All responses are finite now that the legacy log stream has been retired.
   return true;
 }
 
