@@ -32,6 +32,7 @@ test("traffic metrics distinguish request kinds without inferring humans or bots
     "/health?poll=1", "/readyz/", "/healthz", "/livez", "/admin/traffic-metrics",
     "/__debug/runtime", "/_debug/ip", "/stream-log", "/view-log", "/view-log-live",
     "/geo-debug", "/robots.txt", "/sitemap.xml", "/favicon.ico", "/ts-client-log",
+    "/ads.txt", "/.well-known/security.txt",
     "/turnstile-sitekey", "/api/v1/status", "/_collect", "/_interact", "/_analytics.gif", "/__hp.gif"
   ]) {
     metrics.start({ method: "HEAD", path, headers: { purpose: "prefetch" } }).finish();
@@ -50,12 +51,12 @@ test("traffic metrics distinguish request kinds without inferring humans or bots
   const snapshot = metrics.getSnapshot();
   assert.equal(snapshot.scope, "current_process");
   assert.ok(Number.isFinite(Date.parse(snapshot.startedAt)));
-  assert.equal(snapshot.byKind.operational.completed, 21);
+  assert.equal(snapshot.byKind.operational.completed, 23);
   assert.equal(snapshot.byKind.head.completed, 1);
   assert.equal(snapshot.byKind.prefetch.completed, 4);
   assert.equal(snapshot.byKind.get.completed, 3);
   assert.equal(snapshot.byKind.other.completed, 1);
-  assert.equal(snapshot.total.completed, 30);
+  assert.equal(snapshot.total.completed, 32);
 });
 
 test("traffic metrics use the supplied optional-prefix matcher with normalized paths", () => {
@@ -70,6 +71,34 @@ test("traffic metrics use the supplied optional-prefix matcher with normalized p
   metrics.start({ path: "/private/healthz-extra" }).finish();
   assert.equal(metrics.getSnapshot().byKind.operational.completed, 2);
   assert.equal(metrics.getSnapshot().byKind.get.completed, 1);
+});
+
+test("utility routes and their prefixed variants do not inflate ordinary GET metrics", () => {
+  const metrics = createHarness({
+    pathMatchesWithOptionalPrefix(path, expected, { allowChildren }) {
+      const normalized = path.replace(/^\/campaign(?=\/)/, "");
+      return normalized === expected || (allowChildren && normalized.startsWith(`${expected}/`));
+    }
+  });
+  metrics.start({ path: "/landing" }).finish(20);
+  const before = metrics.getSnapshot();
+  for (const prefix of ["", "/campaign"]) {
+    for (const path of ["/ads.txt", "/.well-known/security.txt"]) {
+      for (const suffix of ["", "/?source=probe"]) {
+        metrics.start({ path: `${prefix}${path}${suffix}` }).finish(1000);
+      }
+    }
+  }
+  const after = metrics.getSnapshot();
+  assert.deepEqual(after.byKind.get, before.byKind.get, "utility requests must not change GET counters or latency");
+  assert.equal(after.byKind.operational.completed, 8);
+  assert.equal(after.byKind.operational.byStatusClass["2xx"], 8);
+  assert.equal(after.byKind.operational.latencyMs.mean, 1000);
+
+  for (const path of ["/ads.txt/landing", "/.well-known/security.txt/landing", "/ads.txt-extra", "/.well-known/security.txt.bak"]) {
+    metrics.start({ path }).finish();
+  }
+  assert.equal(metrics.getSnapshot().byKind.get.completed, 5, "utility classification must not extend to unrelated paths");
 });
 
 test("early responses are counted and completion events settle a request once", () => {

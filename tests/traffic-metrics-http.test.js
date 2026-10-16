@@ -113,4 +113,20 @@ test('private traffic metrics include early responses and separate HTTP request 
   assert.equal(after.byKind.get.aborted, 0);
   assert.ok(after.byKind.get.latencyMs.recent.sampleCount >= 2);
   assert.doesNotMatch(afterResult.text, /private-value|\.git\/config|tracking=/, 'aggregates do not retain request paths or parameters');
+
+  for (const prefix of ['', '/campaign']) {
+    for (const route of ['/ads.txt', '/.well-known/security.txt']) {
+      const result = await request(`${prefix}${route}?source=metrics-review`);
+      assert.equal(result.response.status, 200, `${prefix}${route} serves utility content`);
+    }
+  }
+  const utilitiesResult = await request('/admin/traffic-metrics', authenticated);
+  assert.equal(utilitiesResult.response.status, 200);
+  const utilities = JSON.parse(utilitiesResult.text);
+  for (const kind of ['get', 'head', 'prefetch', 'other']) {
+    assert.deepEqual(utilities.byKind[kind], after.byKind[kind], `${kind} metrics exclude utility requests`);
+  }
+  // Four utility requests and this operational metrics request were started.
+  assert.equal(utilities.byKind.operational.requests - after.byKind.operational.requests, 5);
+  assert.equal(utilities.byKind.operational.completed - after.byKind.operational.completed, 5);
 });

@@ -28,6 +28,8 @@ The JSON contains `scope: "current_process"`, `startedAt`, `total`, and
 | `other` | Remaining methods, such as POST and OPTIONS. |
 
 Operational classification takes precedence over method and purpose headers.
+The utility routes `/ads.txt` and `/.well-known/security.txt`, including their
+optional-prefix variants, are operational traffic.
 Purpose headers are client supplied and do not identify all automated traffic.
 The `get` group can also contain bots and repeat visits. None of these groups
 represents unique visitors, verified humans, destination arrivals, or conversions.

@@ -10,6 +10,7 @@ const OPERATIONAL_PATHS = [
   "/health", "/readyz", "/healthz", "/livez",
   "/stream-log", "/view-log", "/view-log-live", "/geo-debug",
   "/robots.txt", "/sitemap.xml", "/favicon.ico",
+  "/ads.txt", "/.well-known/security.txt",
   "/ts-client-log", "/turnstile-sitekey", "/api/v1/status",
   "/_collect", "/_interact", "/_analytics.gif", "/__hp.gif"
 ];
