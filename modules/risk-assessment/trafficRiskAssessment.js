@@ -17,8 +17,12 @@ function createTrafficRiskAssessment({
   fetch: fetchImpl = globalThis.fetch, now = Date.now
 } = {}) {
   const enabled = !["0", "false", "off", "no"].includes(String(env.RISK_REPORTING_ENABLED || "1").trim().toLowerCase());
-  const externalEnabled = enabled && ["1", "true", "on", "yes"].includes(String(env.RISK_IP_INTELLIGENCE_ENABLED || "0").trim().toLowerCase());
+  const requestedProvider = String(env.RISK_IP_PROVIDER || "ipapi.is").trim().toLowerCase() || "ipapi.is";
+  const validProvider = ["ipapi.is", "ipquery"].includes(requestedProvider);
+  const providerName = validProvider ? requestedProvider : "unsupported";
+  const externalEnabled = enabled && validProvider && ["1", "true", "on", "yes"].includes(String(env.RISK_IP_INTELLIGENCE_ENABLED || "0").trim().toLowerCase());
   const configErrors = [];
+  if (!validProvider) configErrors.push("RISK_IP_PROVIDER");
   const number = (name, fallback, min, max) => {
     const raw = env[name];
     if (raw == null || raw === "") return fallback;
@@ -46,7 +50,7 @@ function createTrafficRiskAssessment({
     try { redisClient = createRedisClient(); }
     catch (_) { redisSetupFailed = true; configErrors.push("risk_storage_unavailable"); }
   }
-  const provider = suppliedProvider || createFreeIpIntelligenceProvider({ enabled: externalEnabled, fetch: fetchImpl,
+  const provider = suppliedProvider || createFreeIpIntelligenceProvider({ enabled: externalEnabled, provider: providerName, fetch: fetchImpl,
     dailyBudget: number("RISK_IP_DAILY_BUDGET", 900, 0, 1000) });
   const cache = suppliedCache || createIpIntelligenceCache({ enabled: externalEnabled, lookup: provider.lookup,
     maxEntries: number("RISK_IP_CACHE_MAX_ENTRIES", 2048, 1, 10000),
@@ -129,8 +133,8 @@ function createTrafficRiskAssessment({
     campaignWindow = { ...campaignWindow, campaigns: (campaignWindow.campaigns || []).slice(0, 33).map(row => ({ ...row,
       unusualActivity: !row.distinctSourcesSaturated && row.requests >= minRequests && row.distinctSourcesEstimate >= minSources && row.headless >= row.requests / 2 })) };
     return { mode: enabled ? "report_only" : "disabled", scope: "current_process", startedAt, totals: { ...totals }, observerErrors,
-      intelligence: { enabled: externalEnabled, provider: "ipapi.is",
-        capabilities: { hosting: true, proxy: true, vpn: true, residentialProxy: false },
+      intelligence: { enabled: externalEnabled, provider: providerName,
+        capabilities: { hosting: validProvider, proxy: validProvider, vpn: validProvider, residentialProxy: false },
         providerStatus: provider.getStatus(), cache: cache.getStatus() },
       campaignWindow, conversions: { enabled: conversionEnabled, dedupeHours: 24 },
       configErrors: [...configErrors], classification: "indicators_only" };

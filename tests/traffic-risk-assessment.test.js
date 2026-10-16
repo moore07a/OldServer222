@@ -12,6 +12,79 @@ const HASH_SECRET = "unit-hash-secret-abcdefghijklmnopqrstuvwxyz";
 const unknown = (state = "unknown") => ({ state, hosting: null, vpn: null, proxy: null, residentialProxy: null, source: null });
 const TOTAL_FIELDS = ["observedRequests", "headlessMarkers", "headerAnomalies", "networkKnown", "networkUnknown", "hostingIndicators", "proxyIndicators", "vpnIndicators", "residentialProxyIndicators", "challengePassed", "challengeFailed"];
 
+test("explicit IPQuery selection uses the real bounded cache and reports cached network indicators", async t => {
+  const calls = [];
+  const risk = createTrafficRiskAssessment({
+    env: { RISK_IP_PROVIDER: " IPQUERY ", RISK_IP_INTELLIGENCE_ENABLED: "1" }, hashSecret: HASH_SECRET,
+    getRequestIdentity: () => ({ keyIp: "8.8.8.8" }),
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ ip: "8.8.8.8", risk: { is_datacenter: true, is_proxy: true, is_vpn: true },
+        location: { city: "private-provider-location" } }));
+    }
+  });
+  t.after(() => risk.close());
+  risk.observe({ query: {} }, { kind: "get" });
+  assert.equal(calls.length, 0, "visitor observation does not wait for or directly call the provider");
+  await new Promise(resolve => setImmediate(resolve));
+  const cached = await risk.getSnapshot();
+  assert.equal(cached.intelligence.cache.active, 0);
+  assert.equal(cached.intelligence.cache.cacheEntries, 1);
+  risk.observe({ query: {} }, { kind: "get" });
+  const report = await risk.getSnapshot();
+  assert.equal(calls.length, 1, "a repeat visitor request reuses the cached response");
+  assert.equal(calls[0].url, "https://api.ipquery.io/8.8.8.8");
+  assert.equal(calls[0].options.credentials, "omit");
+  assert.equal(calls[0].options.redirect, "error");
+  assert.equal(report.intelligence.provider, "ipquery");
+  assert.equal(report.intelligence.providerStatus.provider, "ipquery");
+  assert.equal(report.intelligence.providerStatus.used, 1);
+  assert.equal(report.intelligence.providerStatus.lastResult, "known");
+  assert.equal(report.intelligence.providerStatus.lastHttpStatus, 200);
+  assert.equal(report.totals.observedRequests, 2);
+  assert.equal(report.totals.networkUnknown, 1, "the first cache miss is not retroactively reclassified");
+  assert.equal(report.totals.networkKnown, 1);
+  for (const field of ["hostingIndicators", "proxyIndicators", "vpnIndicators"]) assert.equal(report.totals[field], 1);
+  assert.equal(report.intelligence.capabilities.residentialProxy, false);
+  assert.equal(report.observerErrors, 0);
+  assert.doesNotMatch(JSON.stringify(report), /8\.8\.8\.8|api\.ipquery\.io|private-provider-location/);
+});
+
+test("provider selection alone is not lookup authorization and the legacy provider remains the default", async t => {
+  for (const env of [{}, { RISK_IP_PROVIDER: "ipquery" }, { RISK_IP_PROVIDER: "ipquery", RISK_REPORTING_ENABLED: "0", RISK_IP_INTELLIGENCE_ENABLED: "1" }]) {
+    const risk = createTrafficRiskAssessment({ env, getRequestIdentity: () => ({ keyIp: "8.8.8.8" }),
+      fetch() { assert.fail("selecting a provider must not silently enable lookups"); } });
+    t.after(() => risk.close());
+    risk.observe({}, { kind: "get" });
+    await new Promise(resolve => setImmediate(resolve));
+    const report = await risk.getSnapshot();
+    assert.equal(report.intelligence.enabled, false);
+    assert.equal(report.intelligence.provider, env.RISK_IP_PROVIDER || "ipapi.is");
+    assert.equal(report.intelligence.providerStatus.provider, env.RISK_IP_PROVIDER || "ipapi.is");
+    assert.equal(report.intelligence.providerStatus.used, 0);
+    assert.equal(report.intelligence.cache.lookups, 0);
+  }
+});
+
+test("unsupported provider configuration disables requests without reflecting its value", async t => {
+  const risk = createTrafficRiskAssessment({ env: { RISK_IP_INTELLIGENCE_ENABLED: "1", RISK_IP_PROVIDER: "https://private-provider.invalid/secret-value" },
+    getRequestIdentity: () => ({ keyIp: "8.8.8.8" }), fetch() { assert.fail("unsupported endpoints cannot receive visitor IPs"); } });
+  t.after(() => risk.close());
+  risk.observe({}, { kind: "get" });
+  await new Promise(resolve => setImmediate(resolve));
+  const report = await risk.getSnapshot();
+  assert.equal(report.mode, "report_only");
+  assert.equal(report.intelligence.enabled, false);
+  assert.equal(report.intelligence.provider, "unsupported");
+  assert.equal(report.intelligence.providerStatus.configured, false);
+  assert.equal(report.intelligence.cache.lookups, 0);
+  assert.deepEqual(report.configErrors, ["RISK_IP_PROVIDER"]);
+  assert.deepEqual(report.intelligence.capabilities, { hosting: false, proxy: false, vpn: false, residentialProxy: false });
+  assert.equal(report.totals.observedRequests, 1);
+  assert.equal(report.totals.networkUnknown, 1);
+  assert.doesNotMatch(JSON.stringify(report), /private-provider|secret-value|https:/);
+});
+
 function harness(options = {}) {
   const seenIps = [];
   const requests = [];

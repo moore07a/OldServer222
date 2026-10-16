@@ -15,26 +15,42 @@ not count as confirmed failures here.
 
 ## Enable free network information
 
-Network lookups are **off by default**. Enable them in deployment environment
-settings and restart:
+Network lookups are **off by default**. To use the free IPQuery adapter, set
+both values in deployment environment settings and restart:
 
 ```dotenv
 RISK_IP_INTELLIGENCE_ENABLED=1
+RISK_IP_PROVIDER=ipquery
 ```
 
-The adapter uses [ipapi.is's documented anonymous API](https://github.com/ipapi-is/ipapi#the-ip-api),
-which advertises 1,000 requests per day without an API key or paid plan.
-Enabling it sends visitor public IPs to that third party over HTTPS. It does
-not send visited URLs, user agents, or application secrets. Lookups use the
-existing trusted request identity; private, reserved, documentation, and
-unsupported special-purpose addresses are skipped.
+IPQuery's [official account](https://github.com/ipqwery/ipqwery) describes its
+free API, and its [official SDK](https://github.com/ipqwery/ipapi-py/blob/main/ipapi/client.py)
+uses HTTPS without an API key. This adapter reads only `risk.is_datacenter`,
+`risk.is_proxy`, and `risk.is_vpn`. A manual request from Railway to the public
+test IP `8.8.8.8` returned HTTP 200 with all three boolean fields, identifying
+that address as a datacenter. This confirms that response schema is available
+there; it does not establish coverage of every VPN or SOCKS5 exit.
+
+The existing default remains `RISK_IP_PROVIDER=ipapi.is`, using
+[ipapi.is's anonymous API](https://github.com/ipapi-is/ipapi#the-ip-api). A
+successful anonymous response observed on Railway supplied geolocation fields
+without the documented network flags, so those results correctly remain
+unknown. Selecting `ipquery` is explicit: the app never switches providers or
+falls back to a second provider automatically.
+
+Enabling lookups sends visitor public IPs to the selected third party over
+HTTPS. It does not send visited URLs, user agents, or application secrets.
+Selecting a provider alone does not enable lookups. Lookups use the existing
+trusted request identity; private, reserved, documentation, and unsupported
+special-purpose addresses are skipped.
 
 Documented fields cover datacenter/hosting, proxy, and VPN indicators.
 Residential-proxy classification remains unknown and displays **Not provided**
-because the provider does not document that field. An ISP name plus a proxy
+because neither adapter documents that field. An ISP name plus a proxy
 flag does not establish a residential proxy. Hosting or VPN use alone does not
-establish abusive traffic. Provider tests use mocked responses, not live
-visitor lookups; availability, accuracy, and plan limits can change.
+establish abusive traffic. Proxy/VPN indicators come from provider data rather
+than active protocol scanning. Automated provider tests use mocked responses,
+not live visitor lookups; availability, accuracy, and provider limits can change.
 
 Visitor requests never wait for intelligence. A cache miss counts as unknown
 and queues background work; later requests can use the cached result. Earlier
@@ -54,10 +70,12 @@ another eligible visitor request can retry after that TTL expires.
 
 The default budget is 900 attempted lookups per rolling 24 hours **per running
 process**, including failures. It resets on restart and is not shared through
-Redis. The provider's anonymous quota is shared by outbound IP address, so
-replicas, frequent restarts, other apps, and shared hosting egress can exhaust
-it sooner. Divide `RISK_IP_DAILY_BUDGET` across replicas. Rate limits leave
-results unknown and do not interrupt redirects.
+Redis or disk. This is an application limit, not a promise about the provider's
+allowance. ipapi.is documents 1,000 anonymous requests per day shared by outbound
+IP; IPQuery may impose its own limits. Replicas, frequent restarts, other apps,
+and shared hosting egress can consume a shared allowance sooner. Divide
+`RISK_IP_DAILY_BUDGET` across replicas. Rate limits leave results unknown and do
+not interrupt redirects.
 
 ## Campaign windows
 
@@ -193,6 +211,7 @@ separate.
 | --- | --- |
 | `RISK_REPORTING_ENABLED` | On; `0`, `false`, `off`, or `no` disables reporting/conversions. |
 | `RISK_IP_INTELLIGENCE_ENABLED` | Off; `1`, `true`, `on`, or `yes` enables third-party lookups. |
+| `RISK_IP_PROVIDER` | `ipapi.is`; accepts `ipapi.is` or `ipquery` (case-insensitive). An unsupported value disables lookups and reports this setting's name in configuration errors. |
 | `RISK_IP_DAILY_BUDGET` | `900`; integer 0–1,000 per process per rolling day. |
 | `RISK_IP_CACHE_MAX_ENTRIES` | `2048`; integer 1–10,000. |
 | `RISK_IP_QUEUE_MAX` | `64`; integer 1–128. Active concurrency stays at two. |
