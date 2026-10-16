@@ -18,7 +18,7 @@ function eventTarget(extra = {}) {
 const flush = async () => { for (let step = 0; step < 12; step += 1) await Promise.resolve(); };
 const report = (requests = 0) => ({ ok: true, total: { requests }, shared: { total: { requests: requests * 2 } } });
 
-function harness() {
+function harness({ root } = {}) {
   let at = 1000;
   let serial = 0;
   let clears = 0;
@@ -29,7 +29,7 @@ function harness() {
   const document = eventTarget({ hidden: false });
   const window = eventTarget({ location: { href: "https://app.example/campaign/admin/traffic-panel", origin: "https://app.example" } });
   const controller = createTrafficPanelController({
-    window, document, metricsUrl: "/campaign/admin/traffic-metrics", AbortController,
+    window, document, root, metricsUrl: "/campaign/admin/traffic-metrics", AbortController,
     now: () => at,
     setTimeout(fn, delay) { const id = ++serial; timers.set(id, { fn, at: at + delay, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -40,7 +40,7 @@ function harness() {
       calls.push({ url, options, resolve, reject });
       return result;
     },
-    view: {
+    view: root ? undefined : {
       update(state) { states.push({ ...state }); },
       clear() { clears += 1; },
       render(data, scope, history) { rendered.push({ data, scope, history: history.map((sample) => ({ ...sample })) }); }
@@ -233,6 +233,48 @@ test("logout and reconnect discard old work and fixed-size chart history never e
   await panel.advance(60000);
   assert.equal(panel.calls.length, before);
   panel.controller.destroy();
+});
+
+test("document view renders log error messages and timestamps as text and clears recovered errors", async t => {
+  function element(dataset = {}) {
+    let content = "";
+    return eventTarget({
+      dataset, value: "", disabled: false,
+      get textContent() { return content; },
+      set textContent(value) { content = String(value); },
+      set innerHTML(value) { assert.fail("Panel values must be rendered as text, never HTML"); },
+      setAttribute() {}
+    });
+  }
+  // Derive the real view's available elements from the rendered panel shell.
+  const html = renderTrafficPanel({ nonce: "test-nonce" });
+  const roles = new Map([...html.matchAll(/data-role="([^"]+)"/g)].map(([, name]) => [name, element()]));
+  const fields = new Map([...html.matchAll(/data-value="([^"]+)"/g)].map(([, name]) => [name, element({ value: name })]));
+  const root = {
+    querySelector(selector) {
+      const match = /^\[data-role="([^"]+)"\]$/.exec(selector);
+      assert.ok(match && roles.has(match[1]), `Unknown view element: ${selector}`);
+      return roles.get(match[1]);
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, "[data-value]");
+      return [...fields.values()];
+    }
+  };
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const at = "2026-10-16T14:30:00.000Z";
+  const message = 'EACCES: permission denied <img src=x onerror="alert(1)">';
+  const logError = fields.get("resources.logFileLastError");
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(1), runtime: { resources: { logFileLastError: { at, message } } } });
+  assert.equal(logError.textContent, `${message} · ${new Date(at).toLocaleString()}`);
+  assert.equal(logError.textContent.includes("[object Object]"), false);
+  assert.equal(panel.controller.getState().error, false, "the real document view rendered the report successfully");
+
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), runtime: { resources: { logFileLastError: null } } });
+  assert.equal(logError.textContent, "None", "a recovered writer clears the prior error");
 });
 
 test("rendered shell escapes route and nonce attributes and contains no preloaded traffic data or inline handlers", () => {

@@ -232,7 +232,11 @@ function createTrafficPanelController(options = {}) {
         const resources = runtime.resources || {};
         for (const key of ["openSockets", "logFileQueueLines", "logFileQueueBytes", "logFileDroppedLines"]) text(`resources.${key}`, numeric(resources[key]));
         text("resources.logFileDrainPending", typeof resources.logFileDrainPending === "boolean" ? resources.logFileDrainPending ? "Yes" : "No" : "—");
-        text("resources.logFileLastError", resources.logFileLastError || "None");
+        const logFileError = resources.logFileLastError;
+        const logFileErrorText = logFileError && typeof logFileError === "object"
+          ? `${logFileError.message || "Unknown error"}${logFileError.at ? ` · ${date(logFileError.at)}` : ""}`
+          : logFileError || "None";
+        text("resources.logFileLastError", logFileErrorText);
         const storage = report.storage || {};
         text("storage.state", !storage.configured ? "Not configured · memory only" : storage.ready ? "Connected" : "Unavailable · pending locally");
         for (const key of ["pendingObservations", "uncertainObservations", "droppedObservations"]) text(`storage.${key}`, numeric(storage[key]));

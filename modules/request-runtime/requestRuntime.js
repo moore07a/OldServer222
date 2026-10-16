@@ -370,8 +370,19 @@ function roundMetric(value, digits = 2) {
   return Math.round(n * pow) / pow;
 }
 
-function getRuntimeUsageSnapshot() {
+function getRuntimeMemorySnapshot() {
   const mem = process.memoryUsage();
+  return {
+    rssMb: roundMetric(mem.rss / (1024 * 1024)),
+    heapUsedMb: roundMetric(mem.heapUsed / (1024 * 1024)),
+    heapTotalMb: roundMetric(mem.heapTotal / (1024 * 1024)),
+    externalMb: roundMetric(mem.external / (1024 * 1024)),
+    arrayBuffersMb: roundMetric((mem.arrayBuffers || 0) / (1024 * 1024))
+  };
+}
+
+function getRuntimeUsageSnapshot() {
+  const memory = getRuntimeMemorySnapshot();
   const nowNs = process.hrtime.bigint();
   const currentUsage = process.cpuUsage();
 
@@ -397,13 +408,7 @@ function getRuntimeUsageSnapshot() {
       loadAvg15m: roundMetric(os.loadavg()[2]),
       note: "loadAvg* reflects host/container scheduler load and is not app-only CPU%"
     },
-    memory: {
-      rssMb: roundMetric(mem.rss / (1024 * 1024)),
-      heapUsedMb: roundMetric(mem.heapUsed / (1024 * 1024)),
-      heapTotalMb: roundMetric(mem.heapTotal / (1024 * 1024)),
-      externalMb: roundMetric(mem.external / (1024 * 1024)),
-      arrayBuffersMb: roundMetric((mem.arrayBuffers || 0) / (1024 * 1024))
-    }
+    memory
   };
 }
 
@@ -660,6 +665,7 @@ function normalizePathPreservingEmbeddedUrls(pathValue) {
     isNoisyClientAbortParseError,
     getClientErrorAggregateIp,
     roundMetric,
+    getRuntimeMemorySnapshot,
     getRuntimeUsageSnapshot,
     app,
     resolveOrCreateRequestId,

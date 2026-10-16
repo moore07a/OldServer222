@@ -59,6 +59,7 @@ function createCoreRoutes(dependencies) {
     getEventTimestamp,
     getLogFileStatus,
     getRuntimeResourceGauges,
+    getRuntimeMemorySnapshot,
     getRuntimeUsageSnapshot,
     getTrackedInFlightCount,
     getTrafficMetricsSnapshot,
@@ -307,12 +308,11 @@ if (OPTIONAL_URL_PREFIX) {
 const handleTrafficMetrics = async (_req, res, next) => {
   try {
     const shared = await getSharedTrafficMetricsSnapshot();
-    const usage = getRuntimeUsageSnapshot();
     res.setHeader("Cache-Control", "private, no-store");
     return res.json({
       ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus(),
       runtime: {
-        uptimeSec: Math.floor(process.uptime()), memory: usage.memory,
+        uptimeSec: Math.floor(process.uptime()), memory: getRuntimeMemorySnapshot(),
         resources: getRuntimeResourceGauges(), inFlightRequests: getTrackedInFlightCount()
       }
     });

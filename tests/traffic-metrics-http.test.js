@@ -25,7 +25,18 @@ test('private traffic metrics include early responses and separate HTTP request 
   const adminToken = randomBytes(24).toString('base64url');
   const aesKey = randomBytes(32);
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['-e', `
+    const originalCpuUsage = process.cpuUsage;
+    let cpuUsageReads = 0;
+    process.cpuUsage = (...args) => {
+      cpuUsageReads += 1;
+      return originalCpuUsage(...args);
+    };
+    process.on('message', message => {
+      if (message === 'test:cpu-usage-reads') process.send({ cpuUsageReads });
+    });
+    require('./server.js');
+  `], {
     cwd: path.resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -54,7 +65,7 @@ test('private traffic metrics include early responses and separate HTTP request 
       TRAFFIC_METRICS_REDIS_URL: '',
       eSCANNER_CONFIG_URL: ''
     },
-    stdio: ['ignore', 'ignore', 'ignore']
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc']
   });
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) {
@@ -192,4 +203,26 @@ test('private traffic metrics include early responses and separate HTTP request 
   assert.ok(resources.memory.rssMb > 0);
   assert.ok(resources.memory.heapUsedMb > 0);
   assert.equal(resources.resources.sseListeners, 0);
+
+  async function cpuUsageReads() {
+    const reply = once(child, 'message');
+    child.send('test:cpu-usage-reads');
+    return (await reply)[0].cpuUsageReads;
+  }
+  let cpuReads = await cpuUsageReads();
+  for (const route of ['/admin/traffic-metrics', '/campaign/admin/traffic-metrics']) {
+    const result = await request(route, authenticated);
+    assert.equal(result.response.status, 200);
+    const memory = JSON.parse(result.text).runtime.memory;
+    assert.deepEqual(Object.keys(memory).sort(), ['arrayBuffersMb', 'externalMb', 'heapTotalMb', 'heapUsedMb', 'rssMb']);
+    assert.equal(await cpuUsageReads(), cpuReads, 'panel memory reads must not advance health CPU sampling');
+  }
+  // Readiness may report 503 before the provider heartbeat succeeds; it still
+  // samples CPU. Liveness remains independent of provider availability.
+  for (const [route, statuses] of [['/health', [200, 503]], ['/campaign/healthz', [200]]]) {
+    const result = await request(route);
+    assert.ok(statuses.includes(result.response.status));
+    assert.equal(typeof JSON.parse(result.text).stats.cpu.processPercent, 'number');
+    assert.equal(await cpuUsageReads(), ++cpuReads, 'health checks must continue taking CPU samples');
+  }
 });
