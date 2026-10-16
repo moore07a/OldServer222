@@ -9,10 +9,10 @@ const PUBLIC_IP = "8.8.8.8";
 const json = value => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 const flush = async () => { for (let step = 0; step < 32; step++) await Promise.resolve(); };
 
-function composition(fetch) {
+function composition(fetch, providerId = "ipapi.is") {
   let serial = 0;
   const timers = new Map();
-  const provider = createProvider({ enabled: true, fetch });
+  const provider = createProvider({ enabled: true, provider: providerId, fetch });
   const cache = createCache({ enabled: true, lookup: provider.lookup, maxQueue: 3, concurrency: 2,
     timeoutMs: 10, negativeTtlMs: 60000,
     setTimeout(callback) { const id = ++serial; timers.set(id, callback); return id; },
@@ -34,6 +34,11 @@ test("free intelligence is opt-in and requires the fixed supported provider", as
   assert.equal(await unsupported.lookup(PUBLIC_IP), null);
   assert.equal(unsupported.getStatus().configured, false);
   assert.equal(calls, 0);
+  const disabledIpquery = createProvider({ provider: "ipquery", fetch });
+  assert.equal(await disabledIpquery.lookup(PUBLIC_IP), null);
+  assert.equal(disabledIpquery.getStatus().provider, "ipquery");
+  assert.equal(unsupported.getStatus().provider, null);
+  assert.equal(calls, 0);
 });
 
 test("free intelligence uses HTTPS without redirects or credentials and normalizes documented flags", async () => {
@@ -52,7 +57,90 @@ test("free intelligence uses HTTPS without redirects or credentials and normaliz
   assert.equal(calls[0].options.cache, "no-store");
   assert.equal(calls[0].options.referrerPolicy, "no-referrer");
   assert.equal(provider.getStatus().remaining, 899);
+  assert.equal(provider.getStatus().provider, "ipapi.is");
   assert.doesNotMatch(JSON.stringify(provider.getStatus()), /8\.8\.8\.8|not retained/);
+});
+
+test("IPQuery uses only its explicit HTTPS endpoint and nested documented booleans for IPv4 and IPv6", async () => {
+  const calls = [];
+  const provider = createProvider({ enabled: true, provider: "ipquery", fetch: async (url, options) => {
+    calls.push({ url, options });
+    return json({ ip: PUBLIC_IP, is_datacenter: false, is_proxy: false,
+      risk: { is_datacenter: true, is_proxy: true, is_vpn: false, is_residential_proxy: true,
+        arbitrary: "private ignored value" } });
+  } });
+  for (const ip of [PUBLIC_IP, "2606:4700:4700::1111"]) {
+    assert.deepEqual(await provider.lookup(ip), {
+      hosting: true, proxy: true, vpn: false, residentialProxy: null, source: "ipquery",
+    });
+  }
+  assert.deepEqual(calls.map(call => call.url), ["https://api.ipquery.io/8.8.8.8",
+    "https://api.ipquery.io/2606%3A4700%3A4700%3A%3A1111"]);
+  for (const { options } of calls) {
+    assert.equal(options.method, "GET");
+    assert.deepEqual(options.headers, { Accept: "application/json" });
+    assert.equal(options.redirect, "error");
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.referrerPolicy, "no-referrer");
+  }
+  assert.equal(provider.getStatus().provider, "ipquery");
+  assert.equal(provider.getStatus().lastResult, "known");
+  assert.deepEqual(provider.getStatus().indicatorTypes, { is_datacenter: "boolean", is_proxy: "boolean", is_vpn: "boolean" });
+  assert.doesNotMatch(JSON.stringify(provider.getStatus()), /8\.8\.8\.8|2606|private|arbitrary|residential/);
+});
+
+test("IPQuery missing or null risk fields stay unknown and never use top-level flags or other wrappers", async () => {
+  for (const payload of [{}, { risk: null }, { risk: {} }, { risk: { is_datacenter: null, is_proxy: null, is_vpn: null } },
+    { is_datacenter: true, is_proxy: true, is_vpn: true }, { data: { risk: { is_datacenter: true } } }]) {
+    const provider = createProvider({ enabled: true, provider: "ipquery", fetch: async () => json(payload) });
+    assert.deepEqual(await provider.lookup(PUBLIC_IP), {
+      state: "unknown", reason: "indicators_unavailable", hosting: null, proxy: null, vpn: null,
+      residentialProxy: null, source: "ipquery",
+    });
+    assert.equal(provider.getStatus().lastResult, "unknown");
+    assert.equal(provider.getStatus().failureCode, null);
+    assert.equal(provider.getStatus().unknownReason, "indicators_unavailable");
+  }
+});
+
+test("IPQuery false flags remain known while numeric zero and malformed risk containers remain invalid", async () => {
+  const provider = createProvider({ enabled: true, provider: "ipquery", fetch: async () => json({
+    risk: { is_datacenter: false, is_proxy: false, is_vpn: false } }) });
+  assert.deepEqual(await provider.lookup(PUBLIC_IP), {
+    hosting: false, proxy: false, vpn: false, residentialProxy: null, source: "ipquery",
+  });
+  assert.equal(provider.getStatus().lastResult, "known");
+  for (const risk of [0, false, "private-message", []]) {
+    const malformed = createProvider({ enabled: true, provider: "ipquery", fetch: async () => json({ risk }) });
+    await assert.rejects(malformed.lookup(PUBLIC_IP), { code: "risk_provider_invalid_response" });
+    assert.equal(malformed.getStatus().lastResult, "error");
+    assert.equal(malformed.getStatus().indicatorTypes, null);
+    assert.doesNotMatch(JSON.stringify(malformed.getStatus()), /private-message/);
+  }
+  for (const value of [0, "false", [], { private: "secret" }]) {
+    const invalidType = createProvider({ enabled: true, provider: "ipquery", fetch: async () => json({ risk: { is_proxy: value } }) });
+    await assert.rejects(invalidType.lookup(PUBLIC_IP), { code: "risk_provider_invalid_indicator_types" });
+    assert.doesNotMatch(JSON.stringify(invalidType.getStatus()), /secret|private|8\.8\.8\.8/);
+  }
+});
+
+test("IPQuery failures preserve fixed diagnostics without falling back to another recipient", async () => {
+  for (const [response, code] of [
+    [() => json({ error: "private quota or authentication text" }), "risk_provider_api_error"],
+    [() => new Response("private response", { status: 429 }), "risk_provider_rate_limited"],
+    [() => new Response("private redirect", { status: 302, headers: { location: "https://private.invalid/" } }), "risk_provider_redirect"],
+    [() => new Response("private blocked", { status: 403 }), "risk_provider_http_error"],
+    [() => new Response("private malformed json"), "risk_provider_invalid_response"],
+    [() => new Response(" ".repeat(16385)), "risk_provider_response_too_large"],
+  ]) {
+    const urls = [];
+    const provider = createProvider({ enabled: true, provider: "ipquery", fetch: async url => { urls.push(url); return response(); } });
+    await assert.rejects(provider.lookup(PUBLIC_IP), { code });
+    assert.deepEqual(urls, ["https://api.ipquery.io/8.8.8.8"]);
+    assert.equal(provider.getStatus().lastResult, "error");
+    assert.doesNotMatch(JSON.stringify(provider.getStatus()), /private|quota or authentication|8\.8\.8\.8|https:/);
+  }
 });
 
 test("free intelligence reports absent or null flags as unavailable without inventing coverage", async () => {
@@ -130,10 +218,11 @@ test("free intelligence rejects invalid IPs without spending budget or issuing r
   assert.equal(provider.getStatus().used, 0);
 });
 
-test("free intelligence enforces a rolling 24-hour budget across concurrent calls and failures", async () => {
+for (const providerId of ["ipapi.is", "ipquery"]) {
+test(`${providerId} enforces a rolling 24-hour budget across concurrent calls and failures`, async () => {
   let clock = 0;
   let calls = 0;
-  const provider = createProvider({ enabled: true, dailyBudget: 2, now: () => clock,
+  const provider = createProvider({ enabled: true, provider: providerId, dailyBudget: 2, now: () => clock,
     fetch: async () => { calls += 1; throw new Error("sensitive IP and URL"); } });
   const results = await Promise.allSettled([provider.lookup(PUBLIC_IP), provider.lookup(PUBLIC_IP), provider.lookup(PUBLIC_IP)]);
   assert.deepEqual(results.map(result => result.reason.code), ["risk_provider_network", "risk_provider_network", "risk_provider_budget_exhausted"]);
@@ -149,6 +238,7 @@ test("free intelligence enforces a rolling 24-hour budget across concurrent call
   assert.equal(provider.getStatus().quotaScope, "process");
   assert.equal(createProvider({ enabled: true, dailyBudget: 99999 }).getStatus().dailyBudget, 1000);
 });
+}
 
 test("free intelligence suppresses upstream status messages and rejects redirects", async () => {
   for (const [status, code] of [[429, "risk_provider_rate_limited"], [503, "risk_provider_http_error"], [302, "risk_provider_redirect"]]) {
@@ -216,7 +306,8 @@ test("free intelligence honors cooperative fetch cancellation and cancels a stal
   assert.equal(provider.getStatus().used, 0);
 });
 
-test("provider and cache retain only two ignored-abort fetches and discard late results", async t => {
+for (const providerId of ["ipapi.is", "ipquery"]) {
+test(`${providerId} and cache retain only two ignored-abort fetches and discard late results`, async t => {
   const calls = [];
   let inFlight = 0;
   let peak = 0;
@@ -225,7 +316,7 @@ test("provider and cache retain only two ignored-abort fetches and discard late 
     inFlight += 1;
     peak = Math.max(peak, inFlight);
     calls.push({ signal, resolve(value) { inFlight -= 1; resolve(value); } });
-  }));
+  }), providerId);
   t.after(() => h.cache.close());
   h.cache.observe("8.8.8.8");
   h.cache.observe("1.1.1.1");
@@ -263,7 +354,7 @@ test("provider and cache retain only two ignored-abort fetches and discard late 
   assert.equal(h.cache.getStatus().cacheEntries, 0);
 });
 
-test("provider and cache keep ownership until both ignored body reads and cancellation settle", async t => {
+test(`${providerId} and cache keep ownership until both ignored body reads and cancellation settle`, async t => {
   const calls = [];
   const h = composition(async (_url, { signal }) => {
     const call = { signal, cancellations: 0 };
@@ -275,7 +366,7 @@ test("provider and cache keep ownership until both ignored body reads and cancel
         releaseLock() { call.released = true; }
       };
     } } };
-  });
+  }, providerId);
   t.after(() => h.cache.close());
   h.cache.observe("8.8.8.8");
   h.cache.observe("1.1.1.1");
@@ -308,12 +399,12 @@ test("provider and cache keep ownership until both ignored body reads and cancel
   assert.equal(h.cache.getStatus().queued, 0);
 });
 
-test("late aborted fetch responses retain ownership until their body cancellation settles", async () => {
+test(`${providerId} late aborted fetch responses retain ownership until their body cancellation settles`, async () => {
   let resolveFetch;
   let resolveCancel;
   let cancellations = 0;
   const controller = new AbortController();
-  const provider = createProvider({ enabled: true, fetch: () => new Promise(resolve => { resolveFetch = resolve; }) });
+  const provider = createProvider({ enabled: true, provider: providerId, fetch: () => new Promise(resolve => { resolveFetch = resolve; }) });
   const request = provider.lookup(PUBLIC_IP, { signal: controller.signal });
   const rejection = assert.rejects(request, { code: "risk_provider_aborted" });
   let settled = false;
@@ -327,3 +418,4 @@ test("late aborted fetch responses retain ownership until their body cancellatio
   await rejection;
   assert.equal(settled, true);
 });
+}
