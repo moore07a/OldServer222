@@ -67,6 +67,8 @@ async function fixture() {
       RUNTIME_DIAG_DIR: directory, NPM_CONFIG_LOGS_DIR: directory,
       PUBLIC_ENABLE_BACKGROUND: '0', IPINFO_LITE_ENABLED: '0',
       REDIS_URL: '', REDIS_PRIVATE_URL: '', TRAFFIC_METRICS_REDIS_URL: '',
+      ANALYTICS_STORAGE_DIR: path.join(directory, 'analytics'),
+      RISK_REPORTING_ENABLED: '1', RISK_IP_INTELLIGENCE_ENABLED: '0',
       eSCANNER_CONFIG_URL: '', SHUTDOWN_GRACE_MS: '1000'
     },
     // Startup diagnostics may contain deployment details. Never echo them.
@@ -177,7 +179,9 @@ async function main() {
     assert.equal(metricsRequests, 0, 'locked panel makes no unauthenticated API requests');
     assert.equal(await timerCount(), 0, 'locked panel has no refresh timers');
     await blank();
+    const firstMetricsResponse = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/admin/traffic-metrics') && response.status() === 200);
     await login();
+    const firstReport = await (await firstMetricsResponse).json();
     assert.equal(metricsRequests, 1);
     assert.equal(await page.locator(role('token')).inputValue(), '', 'token input is cleared after submit');
     assert.ok(await page.locator(role('token')).isDisabled());
@@ -191,6 +195,41 @@ async function main() {
     assert.equal(consoleErrors.length, 0, 'normal rendering has no CSP or console errors');
     checks.push('Locked state, bearer login, cleared password input, empty URL/cookie/browser storage, CSP and runtime gauges');
 
+    assert.equal(firstReport.diskStorage.configured, true, 'the fixture has isolated disk analytics');
+    assert.equal(firstReport.diskStorage.ready, true);
+    assert.equal(firstReport.persistent.scope, 'disk');
+    await page.locator(role('scope')).selectOption('persistent');
+    assert.equal(metricsRequests, 1, 'selecting disk scope uses the report already loaded');
+    // Disk totals expose acknowledged checkpoints. The initial empty checkpoint
+    // is valid; let the existing five-second save/poll cycle provide a saved
+    // report with completed requests rather than forcing writes from the UI.
+    let diskReport = firstReport;
+    if (!diskReport.persistent.total.requests) {
+      const savedResponse = await page.waitForResponse(async response => {
+        if (!new URL(response.url()).pathname.endsWith('/admin/traffic-metrics') || response.status() !== 200) return false;
+        return (await response.json()).persistent?.total.requests > 0;
+      }, { timeout: 15000 });
+      diskReport = await savedResponse.json();
+      await page.waitForFunction(expected => document.querySelector('[data-value="requests"]').textContent === expected, diskReport.persistent.total.requests.toLocaleString());
+    }
+    assert.ok(diskReport.persistent.total.requests > 0);
+    assert.equal(await page.locator(role('scope-heading')).textContent(), 'Persisted disk totals');
+    assert.match(await page.locator(role('scope-note')).textContent(), /do not combine separate replica volumes/);
+    assert.equal(await page.locator(value('storage.backends')).textContent(), 'Disk');
+    assert.equal(await page.locator(value('disk.state')).textContent(), 'Ready');
+    assert.equal(await page.locator(value('requests')).textContent(), diskReport.persistent.total.requests.toLocaleString());
+    for (const key of ['mean', 'max']) {
+      const expected = `${diskReport.persistent.total.latencyMs[key].toLocaleString(undefined, { maximumFractionDigits: 2 })} ms`;
+      assert.equal(await page.locator(value(`latency.${key}`)).textContent(), expected);
+    }
+    for (const key of ['inFlight', 'latency.p50', 'latency.p95', 'latency.p99', 'latency.samples']) {
+      assert.equal(await page.locator(value(key)).textContent(), '—', `disk scope does not imply persisted ${key}`);
+    }
+    assert.equal(await page.locator(value('memory.rss')).textContent(), diskReport.runtime.memory.rssMb.toLocaleString(undefined, { maximumFractionDigits: 1 }));
+    assert.equal(await page.locator(value('runtime.inFlightRequests')).textContent(), diskReport.runtime.inFlightRequests.toLocaleString());
+    assert.match(await page.locator(role('campaign-window')).textContent(), /Persisted disk window/);
+    assert.match(await page.locator(role('campaign-storage')).textContent(), /Disk ready/);
+    checks.push('Isolated disk storage: persisted totals, mean/max, disk status and campaign window; no persisted in-flight/percentile claims; resources remain current process');
     await fs.mkdir(path.dirname(config.screenshot), { recursive: true });
     await page.screenshot({ path: config.screenshot, fullPage: true });
     result.screenshot = config.screenshot;

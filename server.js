@@ -353,6 +353,14 @@ let trafficRiskAssessment = null;
 const createRetiredLogPolicy = require("./modules/runtime-utils/retiredLogPolicy.js");
 const isRetiredLogPath = createRetiredLogPolicy({ optionalPrefix: SCANNER_OPTIONAL_URL_PREFIX });
 const createSharedTrafficMetricsStore = require("./modules/runtime-utils/sharedTrafficMetricsStore.js");
+const createDiskAnalytics = require("./modules/runtime-utils/diskAnalytics.js");
+const analyticsDirectory = Object.hasOwn(process.env, "ANALYTICS_STORAGE_DIR")
+  ? String(process.env.ANALYTICS_STORAGE_DIR || "").trim()
+  : process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, "analytics") : "";
+const diskAnalytics = createDiskAnalytics({
+  directory: analyticsDirectory.toLowerCase() === "off" ? "" : analyticsDirectory,
+  namespace: process.env.TRAFFIC_METRICS_NAMESPACE || "oldserver222"
+});
 const metricsRedisUrl = String(process.env.TRAFFIC_METRICS_REDIS_URL || process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "").trim();
 const metricsRedis = metricsRedisUrl ? new Redis(metricsRedisUrl, {
   commandTimeout: 1000,
@@ -372,9 +380,13 @@ const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot,
   isRetiredLogPath,
   onRequest: (observation, req) => {
     sharedTrafficMetrics.recordRequest(observation);
+    diskAnalytics.recordRequest(observation);
     trafficRiskAssessment?.observe(req, observation);
   },
-  onChallengeEvent: sharedTrafficMetrics.recordChallengeEvent
+  onChallengeEvent: event => {
+    sharedTrafficMetrics.recordChallengeEvent(event);
+    diskAnalytics.recordChallengeEvent(event);
+  }
 });
 function recordChallengeEvent(event, req) {
   recordBaseChallengeEvent(event);
@@ -384,7 +396,10 @@ const getSharedTrafficMetricsSnapshot = sharedTrafficMetrics.getSnapshot;
 const getTrafficMetricsStorageStatus = sharedTrafficMetrics.getStatus;
 async function closeMetrics() {
   try { await Promise.allSettled([sharedTrafficMetrics.close(), trafficRiskAssessment?.close()]); }
-  finally { if (metricsRedis) metricsRedis.disconnect(); }
+  finally {
+    await diskAnalytics.close();
+    if (metricsRedis) metricsRedis.disconnect();
+  }
 }
 const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
 const FORWARDER_AUTH_HEADER = "x-mds-forwarder-auth";
@@ -1406,6 +1421,9 @@ let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight
 
 trafficRiskAssessment = createTrafficRiskAssessment({
   env: process.env, hashSecret: ADMIN_TOKEN, getRequestIdentity, headlessSuspicion,
+  onRiskObservation: diskAnalytics.recordRisk,
+  persistence: diskAnalytics.configured && !String(process.env.RISK_REDIS_URL || "").trim()
+    ? { onDirty: diskAnalytics.markDirty, commit: diskAnalytics.flush, isReady: diskAnalytics.isReady } : null,
   createRedisClient: () => {
     const url = String(process.env.RISK_REDIS_URL || metricsRedisUrl).trim();
     if (!url) return null;
@@ -1424,6 +1442,8 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   handleSecurityTxt: handleSecurityTxtImpl
 } = createCoreRoutes({
   trafficRiskAssessment,
+  getPersistentTrafficMetricsSnapshot: diskAnalytics.getSnapshot,
+  getDiskAnalyticsStorageStatus: diskAnalytics.getStatus,
   recordChallengeEvent,
   ACTIVE_REQUEST_DUMP_LIMIT,
   ACTIVE_REQUEST_TOP_PATH_LIMIT,
@@ -1596,7 +1616,12 @@ const { startupSummary } = createStartupSummary({
   runtimeStats, trustProxyEffective, zoneLabel
 });
 
-const server = app.listen(PORT, async () => {
+const server = require("node:http").createServer(app);
+let startupCancelled = false;
+void diskAnalytics.initialize({ exportState: trafficRiskAssessment.exportPersistentState,
+  restoreState: trafficRiskAssessment.restorePersistentState }).then(() => {
+if (startupCancelled) return;
+server.listen(PORT, async () => {
   await loadScannerPatterns();
 
   trackIntervalHandle("health", setInterval(checkTurnstileReachable, HEALTH_INTERVAL_MS));
@@ -1673,6 +1698,7 @@ const server = app.listen(PORT, async () => {
   checkTurnstileReachable();
 
   addSpacer();
+});
 });
 
 server.keepAliveTimeout = SERVER_KEEP_ALIVE_TIMEOUT_MS;
@@ -1768,5 +1794,5 @@ const { gracefulShutdown, scheduleFatalExit } = createProcessLifecycle({
   recordRuntimeIncident, runtimeStats, safeLogValue, server, summarizeError
 });
 
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => { startupCancelled = true; void gracefulShutdown("SIGTERM"); });
+process.on("SIGINT", () => { startupCancelled = true; void gracefulShutdown("SIGINT"); });

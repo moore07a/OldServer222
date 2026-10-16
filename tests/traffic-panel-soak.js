@@ -32,10 +32,11 @@ const boundedPush = (values, value, limit) => {
 };
 
 function options(argv) {
-  const out = { durationSec: 300, rps: 30, concurrency: 8, panels: 3, timeoutMs: 5000, redisOutageSec: 0, output: null, smoke: false };
-  const keys = { '--duration-sec': 'durationSec', '--rps': 'rps', '--concurrency': 'concurrency', '--panels': 'panels', '--timeout-ms': 'timeoutMs', '--redis-outage-sec': 'redisOutageSec' };
+  const out = { durationSec: 300, rps: 30, concurrency: 8, panels: 3, timeoutMs: 5000, redisOutageSec: 0, diskOutageSec: 0, disk: false, output: null, smoke: false };
+  const keys = { '--duration-sec': 'durationSec', '--rps': 'rps', '--concurrency': 'concurrency', '--panels': 'panels', '--timeout-ms': 'timeoutMs', '--redis-outage-sec': 'redisOutageSec', '--disk-outage-sec': 'diskOutageSec' };
   for (let index = 0; index < argv.length; index++) {
     const key = argv[index];
+    if (key === '--disk') { out.disk = true; continue; }
     if (key === '--smoke') { out.smoke = true; continue; }
     if (key === '--output') { out.output = path.resolve(argv[++index]); continue; }
     if (!keys[key]) throw new Error(`Unknown option: ${key}`);
@@ -50,6 +51,8 @@ function options(argv) {
   if (out.durationSec < (out.smoke ? 1 : 180)) throw new Error('Use at least 180 seconds, or --smoke for a startup-only debugging run');
   if (out.concurrency > 128 || out.panels > 32 || out.rps > 1000 || out.durationSec > 86400) throw new Error('Requested load exceeds local safety limits');
   if (out.redisOutageSec && (out.redisOutageSec < 5 || out.redisOutageSec > out.durationSec / 3)) throw new Error('Redis outage must be 5 seconds or more and at most one third of the run');
+  if (out.diskOutageSec && (!out.disk || out.diskOutageSec < 5 || out.diskOutageSec > out.durationSec / 3)) throw new Error('Disk outage requires --disk and 5 seconds or more, at most one third of the run');
+  if (out.disk && out.redisOutageSec) throw new Error('Choose disk or Redis fault injection');
   return out;
 }
 
@@ -81,6 +84,49 @@ async function redisFaultProxy(redisUrl) {
     async close() {
       for (const socket of sockets) socket.destroy();
       await new Promise(resolve => proxy.close(resolve));
+    }
+  };
+}
+
+async function diskFault(directory) {
+  const backup = `${directory}.fault-backup-${randomBytes(8).toString('hex')}`;
+  const blockerBackup = `${directory}.fault-marker-${randomBytes(8).toString('hex')}`;
+  let original;
+  let blocker;
+  let moved = false;
+  const absent = async target => {
+    try { await fs.lstat(target); throw new Error('Owned fixture destination already exists'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  };
+  const same = (left, right) => left.ino === right.ino && left.dev === right.dev;
+  return {
+    async disconnect() {
+      original = await fs.lstat(directory);
+      assert.ok(original.isDirectory() && !original.isSymbolicLink());
+      await absent(backup);
+      await fs.rename(directory, backup);
+      moved = true;
+      // The existing worker retains its flock inode inside the moved directory.
+      // ENOTDIR on future writes forces an ordinary write_failed response.
+      const handle = await fs.open(directory, 'wx', 0o600);
+      try { await handle.writeFile('owned analytics outage fixture'); blocker = await handle.stat(); }
+      finally { await handle.close(); }
+    },
+    async reconnect() {
+      if (!moved) return;
+      const saved = await fs.lstat(backup);
+      assert.ok(saved.isDirectory() && same(saved, original));
+      if (blocker) {
+        const current = await fs.lstat(directory);
+        assert.ok(current.isFile() && same(current, blocker));
+        await absent(blockerBackup);
+        await fs.rename(directory, blockerBackup);
+      } else await absent(directory);
+      // Only paths created by this unique temporary fixture can be restored.
+      await absent(directory);
+      await fs.rename(backup, directory);
+      moved = false;
+      if (blocker) { await fs.unlink(blockerBackup); blocker = null; }
     }
   };
 }
@@ -129,7 +175,8 @@ async function main() {
   const adminToken = randomBytes(32).toString('base64url');
   const tokenBody = Buffer.from(JSON.stringify({ next: '/r?d=local-soak-fixture', ts: Date.now(), exp: Date.now() + (cfg.durationSec + 600) * 1000 })).toString('base64url');
   const challengeBody = JSON.stringify({ ct: `${tokenBody}.${createHmac('sha256', adminToken).update(tokenBody).digest('base64url')}` });
-  const redisUrl = process.env.TRAFFIC_METRICS_TEST_REDIS_URL || '';
+  const redisUrl = cfg.disk ? '' : process.env.TRAFFIC_METRICS_TEST_REDIS_URL || '';
+  const analyticsDirectory = path.join(directory, 'analytics');
   const fixtureNamespace = `panel-soak-${randomBytes(8).toString('hex')}`;
   const riskCampaignId = 'soak_campaign';
   // Ignore inherited risk credentials/provider switches/Redis endpoints entirely.
@@ -138,6 +185,9 @@ async function main() {
   // The fault proxy belongs to this test. The supplied Redis service is never
   // stopped, paused, reconfigured, or otherwise modified by fault injection.
   const redisProxy = cfg.redisOutageSec ? await redisFaultProxy(redisUrl) : null;
+  const diskProxy = cfg.diskOutageSec ? await diskFault(analyticsDirectory) : null;
+  const diskOutage = { enabled: Boolean(diskProxy), started: false, recovered: false, failedReports: 0, recoveredReports: 0 };
+  const diskSummary = { samples: 0, saveAdvances: 0, pendingBytesPeak: 0, savedRequestsAtStart: null, savedRequestsAtEnd: null, lastSaveAt: null, files: 0, fileBytes: 0, checkpointRequests: 0 };
   const outage = { enabled: Boolean(redisProxy), started: false, recovered: false, localReportsDuringOutage: 0, recoveredReports: 0, pendingPeak: 0 };
   const riskScopes = new Set();
   const riskSummary = { samples: 0, observerErrors: 0, providerLookups: 0, cacheEntriesPeak: 0, cacheQueuePeak: 0, cacheActivePeak: 0, pendingOperationsPeak: 0, localReportsDuringOutage: 0, recoveredReports: 0 };
@@ -263,11 +313,11 @@ async function main() {
     assert.ok(cache.queued >= 0 && cache.queued <= cache.limits.maxQueue && cache.limits.maxQueue <= 8);
     assert.ok(cache.active >= 0 && cache.active <= cache.limits.concurrency && cache.limits.concurrency <= 2);
     const window = risk.campaignWindow;
-    assert.ok(['current_process', 'redis', 'unavailable'].includes(window.scope));
+    assert.ok(['current_process', 'redis', 'disk', 'unavailable'].includes(window.scope));
     assert.equal(window.attribution, 'client_supplied');
     assert.equal(window.campaigns.length, 2);
     assert.ok(window.campaigns.every(row => [riskCampaignId, '__unattributed__'].includes(row.id)));
-    assert.equal(window.storage.configured, Boolean(redisUrl));
+    assert.equal(window.storage.configured, Boolean(redisUrl || cfg.disk));
     assert.ok(Number.isInteger(window.storage.pendingOperations) && window.storage.pendingOperations >= 0 && window.storage.pendingOperations <= window.storage.queueLimit && window.storage.queueLimit <= 128);
     if (window.scope === 'unavailable') assert.equal(window.storage.fallbackScope, 'current_process');
     riskSummary.samples++;
@@ -282,6 +332,52 @@ async function main() {
     if (outage.recovered && window.scope === 'redis' && window.storage.ready && !window.storage.lastError && window.storage.pendingOperations <= 1) riskSummary.recoveredReports++;
   }
 
+  function inspectDisk(metrics) {
+    const status = metrics.diskStorage;
+    assert.equal(status.backend, 'disk');
+    assert.equal(status.configured, true);
+    assert.ok(Number.isInteger(status.maxBytes) && status.maxBytes > 0 && status.maxBytes <= 1024 * 1024);
+    assert.ok(Number.isInteger(status.pendingBytes) && status.pendingBytes >= 0 && status.pendingBytes <= 2 * 1024 * 1024);
+    assert.equal(metrics.persistent.scope, 'disk');
+    assert.ok(Number.isSafeInteger(metrics.persistent.total.requests) && metrics.persistent.total.requests >= 0);
+    assert.ok(Number.isFinite(Date.parse(status.lastSaveAt)));
+    if (status.ready) assert.equal(metrics.risk.campaignWindow.scope, 'disk');
+    else assert.equal(metrics.risk.campaignWindow.scope, 'unavailable');
+    const requests = metrics.persistent.total.requests;
+    if (diskSummary.savedRequestsAtStart === null) diskSummary.savedRequestsAtStart = requests;
+    if (diskSummary.lastSaveAt !== null && diskSummary.lastSaveAt !== status.lastSaveAt) diskSummary.saveAdvances++;
+    diskSummary.lastSaveAt = status.lastSaveAt;
+    diskSummary.savedRequestsAtEnd = requests;
+    diskSummary.samples++;
+    diskSummary.pendingBytesPeak = Math.max(diskSummary.pendingBytesPeak, status.pendingBytes);
+    if (diskOutage.started && !diskOutage.recovered && status.lastError === 'write_failed') diskOutage.failedReports++;
+    if (diskOutage.recovered && status.ready && !status.lastError) diskOutage.recoveredReports++;
+  }
+
+  async function inspectCheckpointFiles(metrics) {
+    const entries = await fs.readdir(analyticsDirectory, { withFileTypes: true });
+    assert.ok(entries.length >= 2 && entries.length <= 4, 'Only a checkpoint, lock, and bounded interrupted-write temporaries may remain');
+    let checkpoint;
+    let totalBytes = 0;
+    for (const entry of entries) {
+      assert.ok(entry.isFile() && !entry.isSymbolicLink());
+      assert.ok(entry.name === `${fixtureNamespace}.json` || entry.name === `${fixtureNamespace}.lock` || (entry.name.startsWith(`.${fixtureNamespace}.`) && entry.name.endsWith('.tmp')));
+      const stat = await fs.lstat(path.join(analyticsDirectory, entry.name));
+      assert.ok(stat.isFile() && stat.nlink === 1 && !(stat.mode & 0o077) && stat.size <= 1024 * 1024);
+      totalBytes += stat.size;
+      if (entry.name === `${fixtureNamespace}.json`) checkpoint = JSON.parse(await fs.readFile(path.join(analyticsDirectory, entry.name), 'utf8'));
+    }
+    assert.ok(totalBytes <= 2 * 1024 * 1024);
+    assert.equal(checkpoint.namespace, fixtureNamespace);
+    assert.equal(checkpoint.data.version, 1);
+    assert.ok(checkpoint.data.http.total.requests >= metrics.persistent.total.requests);
+    assert.ok(checkpoint.data.risk.totals.observedRequests > 0);
+    assert.ok(checkpoint.data.campaigns.campaigns.length <= 33 && checkpoint.data.campaigns.dedupe.length <= 4096);
+    diskSummary.files = entries.length;
+    diskSummary.fileBytes = totalBytes;
+    diskSummary.checkpointRequests = checkpoint.data.http.total.requests;
+  }
+
   async function pollPanel() {
     const response = await checked('/admin/traffic-metrics', 200, { authenticated: true });
     if (!response) return;
@@ -292,6 +388,7 @@ async function main() {
       assert.equal(metrics.ok, true);
       assert.equal(metrics.scope, 'current_process');
       inspectRisk(metrics);
+      if (cfg.disk) inspectDisk(metrics);
       if (redisUrl) assert.equal(metrics.storage.configured, true);
       outage.pendingPeak = Math.max(outage.pendingPeak, metrics.storage?.pendingObservations || 0);
       if (outage.started && !outage.recovered && metrics.shared === null) outage.localReportsDuringOutage++;
@@ -346,6 +443,7 @@ async function main() {
         RUNTIME_DIAG_DIR: directory, RUNTIME_INCIDENT_FILE: path.join(directory, 'incidents.ndjson'),
         LOG_DIR: directory, LOG_FILE: path.join(directory, 'visitors.log'),
         NPM_CONFIG_LOGS_DIR: directory, IPINFO_LITE_ENABLED: '0',
+        ANALYTICS_STORAGE_DIR: cfg.disk ? analyticsDirectory : '', RAILWAY_VOLUME_MOUNT_PATH: '',
         REDIS_URL: '', REDIS_PRIVATE_URL: '', TRAFFIC_METRICS_REDIS_URL: redisProxy ? redisProxy.url : redisUrl,
         TRAFFIC_METRICS_NAMESPACE: fixtureNamespace, eSCANNER_CONFIG_URL: '',
         RISK_REPORTING_ENABLED: '1', RISK_IP_INTELLIGENCE_ENABLED: '0', RISK_IP_DAILY_BUDGET: '0',
@@ -412,6 +510,25 @@ async function main() {
         redisProxy.reconnect();
       }
     }, 100);
+    if (diskProxy) {
+      let faultBusy = false;
+      interval(async () => {
+        if (faultBusy) return;
+        faultBusy = true;
+        try {
+          const elapsed = Date.now() - started;
+          const beginAt = cfg.durationSec * 1000 / 3;
+          if (!diskOutage.started && elapsed >= beginAt) {
+            await diskProxy.disconnect();
+            diskOutage.started = true;
+          } else if (diskOutage.started && !diskOutage.recovered && elapsed >= beginAt + cfg.diskOutageSec * 1000) {
+            await diskProxy.reconnect();
+            diskOutage.recovered = true;
+          }
+        } catch { fail('Owned disk fault fixture failed'); }
+        finally { faultBusy = false; }
+      }, 100);
+    }
     // Each simulated panel schedules its next poll only after the previous one
     // completes, matching the one-in-flight browser controller contract.
     for (let index = 0; index < cfg.panels; index++) {
@@ -460,6 +577,12 @@ async function main() {
     // A successful read is still the single active command when its status is
     // captured; <=1 here means all observation work drained before that read.
     if (redisUrl && (finalRiskWindow?.scope !== 'redis' || !finalRiskWindow.storage.ready || finalRiskWindow.storage.lastError || finalRiskWindow.storage.pendingOperations > 1)) fail('Risk Redis observations did not recover and drain');
+    if (cfg.disk) {
+      if (!metricsAfter?.diskStorage?.ready || metricsAfter.diskStorage.lastError || finalRiskWindow?.scope !== 'disk') fail('Disk checkpoint did not remain available or recover');
+      if (diskSummary.savedRequestsAtEnd <= diskSummary.savedRequestsAtStart || !diskSummary.saveAdvances) fail('Saved disk aggregate did not advance during load');
+      if (diskProxy && (!diskOutage.started || !diskOutage.recovered || !diskOutage.failedReports || !diskOutage.recoveredReports)) fail('Disk write failure and recovery were not demonstrated');
+      try { await inspectCheckpointFiles(metricsAfter); } catch { fail('Disk checkpoint files or saved progress exceeded bounded expectations'); }
+    }
     result = {
       passed: failures.length === 0, smokeOnly: cfg.smoke,
       config: { ...cfg, output: undefined, redisEnabled: Boolean(redisUrl), panelPollIntervalMs: 5000, serverHeapLimitMb: 256 },
@@ -468,6 +591,7 @@ async function main() {
       final: finalHealth ? { inFlightRequests: finalHealth.inFlightRequestsExcludingCurrent, abortedRequests: finalHealth.abortedRequests, requestTimeouts: finalHealth.requestTimeouts, uncaughtExceptions: finalHealth.uncaughtExceptions, unhandledRejections: finalHealth.unhandledRejections, serverErrors: finalHealth.serverErrors, processWarnings: finalHealth.processWarnings, openSockets: finalHealth.resources.openSockets, sseListeners: finalHealth.resources.sseListeners, logQueueBytes: finalHealth.resources.logFileQueueBytes, maxEventLoopLagMs: finalHealth.maxObservedEventLoopLagMs } : null,
       metrics: { startedRequests: metricsBefore?.total?.requests, endedRequests: metricsAfter?.total?.requests, sharedStorageReady: metricsAfter?.storage?.ready ?? false },
       outage,
+      disk: cfg.disk ? { ...diskSummary, outage: diskOutage } : null,
       risk: { ...riskSummary, mode: finalRisk?.mode, scopes: [...riskScopes],
         observedRequests: finalRisk?.totals.observedRequests, campaignScope: finalRiskWindow?.scope,
         providerEnabled: finalRisk?.intelligence.enabled, pendingOperationsAtFinalRead: finalRiskWindow?.storage.pendingOperations,
@@ -488,6 +612,7 @@ async function main() {
       clearTimeout(killTimer);
     }
     if (redisProxy) await redisProxy.close();
+    if (diskProxy) await diskProxy.reconnect();
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
     await fs.rm(directory, { recursive: true, force: true });

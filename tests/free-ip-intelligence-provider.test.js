@@ -55,11 +55,69 @@ test("free intelligence uses HTTPS without redirects or credentials and normaliz
   assert.doesNotMatch(JSON.stringify(provider.getStatus()), /8\.8\.8\.8|not retained/);
 });
 
-test("free intelligence preserves absent or invalid flags as unknown", async () => {
-  const provider = createProvider({ enabled: true, fetch: async () => json({ is_proxy: "false", is_vpn: 0 }) });
+test("free intelligence reports absent or null flags as unavailable without inventing coverage", async () => {
+  for (const payload of [{}, { is_datacenter: null, is_proxy: null, is_vpn: null },
+    { data: { is_datacenter: true }, message: "private text never retained" }]) {
+    const provider = createProvider({ enabled: true, fetch: async () => json(payload) });
+    assert.deepEqual(await provider.lookup(PUBLIC_IP), {
+      state: "unknown", reason: "indicators_unavailable",
+      hosting: null, proxy: null, vpn: null, residentialProxy: null, source: "ipapi.is",
+    });
+    const status = provider.getStatus();
+    assert.equal(status.lastResult, "unknown");
+    assert.equal(status.unknownReason, "indicators_unavailable");
+    assert.equal(status.failureCode, null);
+    assert.equal(status.lastHttpStatus, 200);
+    assert.deepEqual(status.indicatorTypes, Object.fromEntries(["is_datacenter", "is_proxy", "is_vpn"]
+      .map(field => [field, Object.hasOwn(payload, field) ? "null" : "absent"])));
+    assert.doesNotMatch(JSON.stringify(status), /private|message|"data":|8\.8\.8\.8/);
+  }
+});
+
+test("free intelligence keeps false boolean indicators known and exposes only fixed type summaries", async () => {
+  const provider = createProvider({ enabled: true, fetch: async () => json({ is_datacenter: false, is_vpn: null,
+    ip: PUBLIC_IP, token: "private-value", other: { user: "private-person" } }) });
   assert.deepEqual(await provider.lookup(PUBLIC_IP), {
-    hosting: null, proxy: null, vpn: null, residentialProxy: null, source: "ipapi.is",
+    hosting: false, proxy: null, vpn: null, residentialProxy: null, source: "ipapi.is",
   });
+  const status = provider.getStatus();
+  assert.equal(status.lastResult, "known");
+  assert.equal(status.unknownReason, null);
+  assert.deepEqual(status.indicatorTypes, { is_datacenter: "boolean", is_proxy: "absent", is_vpn: "null" });
+  status.indicatorTypes.is_datacenter = "private-mutation";
+  assert.equal(provider.getStatus().indicatorTypes.is_datacenter, "boolean");
+  assert.doesNotMatch(JSON.stringify(provider.getStatus()), /private|token|user|8\.8\.8\.8/);
+});
+
+test("free intelligence rejects wrong indicator types without coercing them or exposing values", async () => {
+  for (const [value, type] of [["false", "string"], [0, "number"], [[], "array"], [{ secret: "private" }, "object"]]) {
+    const provider = createProvider({ enabled: true, fetch: async () => json({ is_datacenter: false, is_proxy: value }) });
+    await assert.rejects(provider.lookup(PUBLIC_IP), { code: "risk_provider_invalid_indicator_types" });
+    const status = provider.getStatus();
+    assert.equal(status.lastResult, "error");
+    assert.equal(status.unknownReason, null);
+    assert.deepEqual(status.indicatorTypes, { is_datacenter: "boolean", is_proxy: type, is_vpn: "absent" });
+    assert.doesNotMatch(JSON.stringify(status), /private|secret|8\.8\.8\.8/);
+  }
+});
+
+test("provider and cache distinguish missing coverage from failure without retrying on panel reads", async t => {
+  let requests = 0;
+  const h = composition(async () => { requests += 1; return json({ company: { type: "isp" } }); });
+  t.after(() => h.cache.close());
+  assert.equal(h.cache.observe(PUBLIC_IP).state, "pending");
+  await flush();
+  assert.equal(h.cache.observe(PUBLIC_IP).state, "unknown");
+  assert.equal(h.cache.observe(PUBLIC_IP).hosting, null);
+  for (let count = 0; count < 36; count++) { h.cache.getStatus(); h.provider.getStatus(); }
+  assert.equal(requests, 1);
+  const status = h.cache.getStatus();
+  assert.equal(status.failed, 0);
+  assert.equal(status.unknownResponses, 1);
+  assert.equal(status.lastUnknownReason, "indicators_unavailable");
+  assert.equal(status.lastError, null);
+  assert.equal(status.active, 0);
+  assert.equal(h.timers.size, 0);
 });
 
 test("free intelligence rejects invalid IPs without spending budget or issuing requests", async () => {
@@ -100,6 +158,9 @@ test("free intelligence suppresses upstream status messages and rejects redirect
       assert.equal(error.message, code);
       return true;
     });
+    assert.equal(provider.getStatus().lastResult, "error");
+    assert.equal(provider.getStatus().lastHttpStatus, status);
+    assert.equal(provider.getStatus().indicatorTypes, null);
   }
   const provider = createProvider({ enabled: true, fetch: async () => ({ ok: true, status: 200, redirected: true }) });
   await assert.rejects(provider.lookup(PUBLIC_IP), { code: "risk_provider_redirect" });
@@ -120,14 +181,17 @@ test("free intelligence limits both declared and streamed response bytes", async
   }
 });
 
-test("free intelligence rejects malformed JSON and API error objects without echoing their content", async () => {
-  for (const response of [() => new Response("secret invalid body"), () => json([]), () => json(null), () => json({ error: "secret quota message" })]) {
+test("free intelligence distinguishes malformed JSON and API error objects without echoing their content", async () => {
+  for (const [response, code] of [[() => new Response("secret invalid body"), "risk_provider_invalid_response"],
+    [() => json([]), "risk_provider_invalid_response"], [() => json(null), "risk_provider_invalid_response"],
+    [() => json({ error: "secret quota message" }), "risk_provider_api_error"]]) {
     const provider = createProvider({ enabled: true, fetch: async () => response() });
     await assert.rejects(provider.lookup(PUBLIC_IP), error => {
-      assert.equal(error.code, "risk_provider_invalid_response");
+      assert.equal(error.code, code);
       assert.doesNotMatch(error.message, /secret/);
       return true;
     });
+    assert.equal(provider.getStatus().lastResult, "error");
   }
 });
 

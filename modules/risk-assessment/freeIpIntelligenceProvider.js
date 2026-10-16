@@ -10,7 +10,16 @@ const SAFE_CODES = new Set([
   "risk_provider_aborted", "risk_provider_network", "risk_provider_invalid_ip",
   "risk_provider_budget_exhausted", "risk_provider_redirect", "risk_provider_rate_limited",
   "risk_provider_http_error", "risk_provider_invalid_response", "risk_provider_response_too_large",
+  "risk_provider_api_error", "risk_provider_invalid_indicator_types",
 ]);
+const INDICATOR_FIELDS = ["is_datacenter", "is_proxy", "is_vpn"];
+
+function indicatorType(value, present) {
+  if (!present) return "absent";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
 
 function providerError(code) {
   const error = new Error(code);
@@ -100,6 +109,10 @@ function createFreeIpIntelligenceProvider({
   // At most 1,000 timestamps are retained, independent of unique visitor IPs.
   const attempts = [];
   let failureCode = null;
+  let lastResult = null;
+  let unknownReason = null;
+  let indicatorTypes = null;
+  let lastHttpStatus = null;
 
   function prune() {
     const instant = now();
@@ -119,11 +132,17 @@ function createFreeIpIntelligenceProvider({
       resetAfterSec: attempts.length ? Math.max(0, Math.ceil((DAY_MS - (instant - attempts[0])) / 1000)) : 0,
       quotaScope: "process",
       failureCode,
+      lastResult,
+      unknownReason,
+      indicatorTypes: indicatorTypes ? { ...indicatorTypes } : null,
+      lastHttpStatus,
     };
   }
 
   async function lookup(ip, { signal } = {}) {
     if (!active) return null;
+    let summary = null;
+    let httpStatus = null;
     try {
       if (typeof ip !== "string" || ip.length > 45 || !isIP(ip) || ip.includes("%")) {
         throw providerError("risk_provider_invalid_ip");
@@ -145,6 +164,8 @@ function createFreeIpIntelligenceProvider({
         cache: "no-store",
         referrerPolicy: "no-referrer",
       });
+      httpStatus = Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599
+        ? response.status : null;
       if (signal?.aborted) {
         await discardBody(response);
         throw providerError("risk_provider_aborted");
@@ -162,12 +183,23 @@ function createFreeIpIntelligenceProvider({
         throw providerError("risk_provider_http_error");
       }
       const payload = await readBoundedJson(response, byteLimit, signal);
-      if (!payload || typeof payload !== "object" || Array.isArray(payload) || payload.error) {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         throw providerError("risk_provider_invalid_response");
       }
+      summary = Object.fromEntries(INDICATOR_FIELDS.map(field => [field, indicatorType(payload[field], Object.hasOwn(payload, field))]));
+      if (payload.error) throw providerError("risk_provider_api_error");
+      if (INDICATOR_FIELDS.some(field => !["absent", "null", "boolean"].includes(summary[field]))) {
+        throw providerError("risk_provider_invalid_indicator_types");
+      }
       const booleanOrUnknown = value => typeof value === "boolean" ? value : null;
+      const available = INDICATOR_FIELDS.some(field => summary[field] === "boolean");
       failureCode = null;
+      lastResult = available ? "known" : "unknown";
+      unknownReason = available ? null : "indicators_unavailable";
+      indicatorTypes = summary;
+      lastHttpStatus = httpStatus;
       return {
+        ...(!available ? { state: "unknown", reason: "indicators_unavailable" } : {}),
         hosting: booleanOrUnknown(payload.is_datacenter),
         proxy: booleanOrUnknown(payload.is_proxy),
         vpn: booleanOrUnknown(payload.is_vpn),
@@ -180,6 +212,10 @@ function createFreeIpIntelligenceProvider({
       const code = error?.code;
       failureCode = SAFE_CODES.has(code)
         ? code : signal?.aborted ? "risk_provider_aborted" : "risk_provider_network";
+      lastResult = "error";
+      unknownReason = null;
+      indicatorTypes = summary;
+      lastHttpStatus = httpStatus;
       throw providerError(failureCode);
     }
   }
