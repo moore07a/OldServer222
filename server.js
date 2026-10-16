@@ -348,6 +348,8 @@ const {
 });
 
 const createTrafficMetrics = require("./modules/runtime-utils/trafficMetrics.js");
+const createTrafficRiskAssessment = require("./modules/risk-assessment/trafficRiskAssessment.js");
+let trafficRiskAssessment = null;
 const createRetiredLogPolicy = require("./modules/runtime-utils/retiredLogPolicy.js");
 const isRetiredLogPath = createRetiredLogPolicy({ optionalPrefix: SCANNER_OPTIONAL_URL_PREFIX });
 const createSharedTrafficMetricsStore = require("./modules/runtime-utils/sharedTrafficMetricsStore.js");
@@ -365,16 +367,23 @@ const sharedTrafficMetrics = createSharedTrafficMetricsStore({
   client: metricsRedis,
   namespace: process.env.TRAFFIC_METRICS_NAMESPACE || "oldserver222"
 });
-const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot, recordChallengeEvent } = createTrafficMetrics({
+const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot, recordChallengeEvent: recordBaseChallengeEvent } = createTrafficMetrics({
   pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args),
   isRetiredLogPath,
-  onRequest: sharedTrafficMetrics.recordRequest,
+  onRequest: (observation, req) => {
+    sharedTrafficMetrics.recordRequest(observation);
+    trafficRiskAssessment?.observe(req, observation);
+  },
   onChallengeEvent: sharedTrafficMetrics.recordChallengeEvent
 });
+function recordChallengeEvent(event, req) {
+  recordBaseChallengeEvent(event);
+  trafficRiskAssessment?.recordChallengeOutcome(event, req);
+}
 const getSharedTrafficMetricsSnapshot = sharedTrafficMetrics.getSnapshot;
 const getTrafficMetricsStorageStatus = sharedTrafficMetrics.getStatus;
 async function closeMetrics() {
-  try { await sharedTrafficMetrics.close(); }
+  try { await Promise.allSettled([sharedTrafficMetrics.close(), trafficRiskAssessment?.close()]); }
   finally { if (metricsRedis) metricsRedis.disconnect(); }
 }
 const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
@@ -1395,10 +1404,26 @@ if (process.env.IP_DEBUG === '1') {
 
 let _health = { ok: null, lastHeartbeat: 0, okStreak: 0, failStreak: 0, inflight: false };
 
+trafficRiskAssessment = createTrafficRiskAssessment({
+  env: process.env, hashSecret: ADMIN_TOKEN, getRequestIdentity, headlessSuspicion,
+  createRedisClient: () => {
+    const url = String(process.env.RISK_REDIS_URL || metricsRedisUrl).trim();
+    if (!url) return null;
+    const client = new Redis(url, {
+      commandTimeout: 1000, connectTimeout: 1000, enableOfflineQueue: false,
+      autoResendUnfulfilledCommands: false, maxRetriesPerRequest: 0,
+      retryStrategy: attempt => Math.min(attempt * 100, 2000)
+    });
+    client.on("error", () => {});
+    return client;
+  }
+});
+
 const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
 ({
   handleSecurityTxt: handleSecurityTxtImpl
 } = createCoreRoutes({
+  trafficRiskAssessment,
   recordChallengeEvent,
   ACTIVE_REQUEST_DUMP_LIMIT,
   ACTIVE_REQUEST_TOP_PATH_LIMIT,

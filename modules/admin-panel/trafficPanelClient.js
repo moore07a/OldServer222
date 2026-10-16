@@ -187,6 +187,64 @@ function createTrafficPanelController(options = {}) {
     listen(find("pause"), "click", () => paused ? resume() : pause());
     listen(find("disconnect"), "click", () => { tokenInput.value = ""; disconnect(); });
     listen(find("scope"), "change", (event) => setScope(event.target.value));
+    function renderRisk(risk) {
+      const available = Boolean(risk && typeof risk === "object");
+      const enabled = available && risk.mode === "report_only";
+      const totals = enabled && risk.totals || {};
+      const intelligence = enabled && risk.intelligence || {};
+      const providerEnabled = intelligence.enabled === true;
+      const capabilities = intelligence.capabilities || {};
+      const provider = intelligence.providerStatus || {};
+      const cache = intelligence.cache || {};
+      const limitedText = (value, fallback = "—") => value === null || value === undefined || value === "" ? fallback : String(value).slice(0, 256);
+      find("risk-mode").textContent = !available ? "Unavailable" : enabled ? "Report only" : "Disabled";
+      find("risk-note").textContent = !available ? "Risk observations are unavailable in this report." : !enabled ? "Risk observations are not enabled. No risk rules are changed by this panel." : `Current process only · since ${date(risk.startedAt)}. Observation does not change request decisions.`;
+      for (const key of ["observedRequests", "headlessMarkers", "headerAnomalies", "networkKnown", "networkUnknown"]) text(`risk.${key}`, numeric(totals[key]));
+      text("risk.observerErrors", numeric(enabled ? risk.observerErrors : null));
+      for (const [key, capability] of [["hostingIndicators", "hosting"], ["proxyIndicators", "proxy"], ["vpnIndicators", "vpn"], ["residentialProxyIndicators", "residentialProxy"]]) {
+        text(`risk.${key}`, providerEnabled && capabilities[capability] === true ? numeric(totals[key]) : !available ? "Unavailable" : "Not provided");
+      }
+      text("risk.provider", !available ? "Unavailable" : !providerEnabled ? "Not enabled" : `${limitedText(intelligence.provider, "Configured provider")} · enabled`);
+      for (const key of ["dailyBudget", "used", "remaining"]) text(`risk.${key}`, providerEnabled ? numeric(provider[key]) : !available ? "Unavailable" : "Not enabled");
+      for (const key of ["cacheHits", "cacheEntries", "active", "queued", "failed", "timeouts", "queueDropped"]) text(`risk.${key}`, providerEnabled ? numeric(cache[key]) : !available ? "Unavailable" : "Not enabled");
+      text("risk.failure", !available ? "Unavailable" : !providerEnabled ? "Not enabled" : limitedText(provider.failureCode || cache.lastError, "None"));
+
+      const campaignWindow = enabled && risk.campaignWindow || {};
+      const campaignStorage = campaignWindow.storage || {};
+      const localFallback = campaignWindow.scope === "unavailable" && campaignStorage.fallbackScope === "current_process";
+      const campaignAvailable = campaignWindow.scope === "current_process" || campaignWindow.scope === "redis" || localFallback;
+      const campaignScope = localFallback ? "Local fallback · shared Redis window unavailable" : campaignWindow.scope === "redis" ? "Shared Redis window" : "Current process window";
+      find("campaign-window").textContent = campaignAvailable ? `${campaignScope} · ${numeric(campaignWindow.windowSeconds)} seconds · since ${date(campaignWindow.windowStartedAt)}. Client-supplied campaign attribution.` : !available ? "Campaign observations are unavailable in this report." : !enabled ? "Campaign observations are not enabled." : "Campaign window is unavailable; no campaign totals are shown.";
+      find("campaign-storage").textContent = !campaignAvailable ? "Campaign storage: unavailable." : `Campaign storage: ${campaignStorage.configured ? campaignStorage.ready ? "Redis connected" : "Redis unavailable" : "current process memory"} · pending ${numeric(campaignStorage.pendingOperations)} · dropped ${numeric(campaignStorage.droppedObservations)} · uncertain ${numeric(campaignStorage.uncertainObservations)} · last error: ${limitedText(campaignStorage.lastError, "None")}.`;
+      const rows = [];
+      const campaigns = campaignAvailable && Array.isArray(campaignWindow.campaigns) ? campaignWindow.campaigns.slice(0, 33) : [];
+      for (const campaign of campaigns) {
+        if (!campaign || typeof campaign !== "object") continue;
+        const row = documentObject.createElement("tr");
+        const values = [
+          limitedText(campaign.id), numeric(campaign.requests), campaign.distinctSourcesSaturated === true ? "At capacity" : numeric(campaign.distinctSourcesEstimate), numeric(campaign.headless),
+          ...["hosting", "proxy", "vpn", "residentialProxy"].map((key) => providerEnabled && capabilities[key] === true ? numeric(campaign[key]) : "Not provided"),
+          risk.conversions && risk.conversions.enabled === true ? numeric(campaign.conversions) : "Not enabled",
+          campaign.unusualActivity === true ? "Unusual activity signal" : "No unusual activity signal"
+        ];
+        for (const value of values) {
+          const cell = documentObject.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        rows.push(row);
+      }
+      if (!rows.length) {
+        const row = documentObject.createElement("tr");
+        const cell = documentObject.createElement("td");
+        cell.colSpan = 10;
+        cell.className = "campaign-empty";
+        cell.textContent = campaignAvailable ? "No attributed campaigns in this window." : "No campaign report available.";
+        row.appendChild(cell);
+        rows.push(row);
+      }
+      find("campaign-rows").replaceChildren(...rows);
+    }
     return {
       update(current) {
         find("connect").disabled = current.connected;
@@ -205,6 +263,11 @@ function createTrafficPanelController(options = {}) {
         for (const element of fields) element.textContent = "—";
         find("chart").setAttribute("points", "");
         find("chart-note").textContent = "No samples yet.";
+        find("risk-mode").textContent = "Unavailable";
+        find("risk-note").textContent = "Connect to load observations.";
+        find("campaign-window").textContent = "No campaign report loaded.";
+        find("campaign-storage").textContent = "Campaign storage: unavailable.";
+        find("campaign-rows").replaceChildren();
       },
       render(report, selected, samples) {
         const shared = selected === "shared";
@@ -247,6 +310,7 @@ function createTrafficPanelController(options = {}) {
         const high = values.length ? Math.max(...values) : 0;
         find("chart").setAttribute("points", values.map((value, index) => `${values.length > 1 ? index * 600 / (values.length - 1) : 0},${100 - ((value - low) / (high - low || 1)) * 90}`).join(" "));
         find("chart-note").textContent = values.length ? `${numeric(values.length)} samples · min ${numeric(low)} · max ${numeric(high)}` : "No samples for this scope.";
+        renderRisk(report.risk);
       }
     };
   }

@@ -116,7 +116,7 @@ async function verifyTurnstileToken(token, remoteip, expected) {
         }
       }
       // Observability must never change token validation or its return value.
-      try { recordChallengeEvent(event); } catch {}
+      try { recordChallengeEvent(event, expected?.request); } catch {}
     }
     return result;
   }

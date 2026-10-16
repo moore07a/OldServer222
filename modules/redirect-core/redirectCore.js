@@ -228,6 +228,7 @@ async function isRecentHeaderlessScannerGet(req, baseString) {
   const linkHash = req.query && req.query.lh ? String(req.query.lh) : hashFirstSeg(baseString);
   const verified = await verifyTurnstileToken(token, identity.ip, {
     action: "link_redirect",
+    request: req,
     linkHash,
     maxAgeSec: MAX_TOKEN_AGE_SEC
   });
@@ -932,7 +933,7 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
   const preverified = req._preverifiedTurnstile;
   const v = preverified && preverified.token === token && preverified.linkHash === linkHash
     ? preverified.verified
-    : await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC });
+    : await verifyTurnstileToken(token, ip, { action:"link_redirect", linkHash, maxAgeSec:MAX_TOKEN_AGE_SEC, request: req });
   if (!v.ok) {
     addLog(`[AUTH] token invalid (${v.reason}) ip=${safeLogValue(ip)} ua="${safeLogValue(ua.slice(0, UA_TRUNCATE_LENGTH))}" -> /challenge`);
     // Missing token is normal for first-time human visits; reserve bypass alerts

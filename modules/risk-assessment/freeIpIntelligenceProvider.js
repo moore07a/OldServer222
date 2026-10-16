@@ -1,0 +1,190 @@
+"use strict";
+
+const { isIP } = require("node:net");
+const { performance } = require("node:perf_hooks");
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FREE_DAILY_LIMIT = 1000;
+const MAX_RESPONSE_BYTES = 16 * 1024;
+const SAFE_CODES = new Set([
+  "risk_provider_aborted", "risk_provider_network", "risk_provider_invalid_ip",
+  "risk_provider_budget_exhausted", "risk_provider_redirect", "risk_provider_rate_limited",
+  "risk_provider_http_error", "risk_provider_invalid_response", "risk_provider_response_too_large",
+]);
+
+function providerError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+async function discardBody(response) {
+  try {
+    await response?.body?.cancel?.();
+  } catch {}
+}
+
+async function readBoundedJson(response, maximumBytes, signal) {
+  const declaredLength = response.headers?.get?.("content-length");
+  if (declaredLength && Number(declaredLength) > maximumBytes) {
+    await discardBody(response);
+    throw providerError("risk_provider_response_too_large");
+  }
+  // Read the byte stream rather than response.json()/text(), which can allocate
+  // an unbounded response before its size can be checked.
+  if (typeof response.body?.getReader !== "function") {
+    await discardBody(response);
+    throw providerError("risk_provider_invalid_response");
+  }
+  const reader = response.body.getReader();
+  let completed = false;
+  let cancellation = null;
+  const bytes = Buffer.allocUnsafe(maximumBytes);
+  let length = 0;
+  function cancelReader() {
+    if (!cancellation) {
+      try { cancellation = Promise.resolve(reader.cancel()).catch(() => {}); }
+      catch { cancellation = Promise.resolve(); }
+    }
+    return cancellation;
+  }
+  const onAbort = () => { void cancelReader(); };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (true) {
+      if (signal?.aborted) throw providerError("risk_provider_aborted");
+      const next = await reader.read();
+      if (signal?.aborted) throw providerError("risk_provider_aborted");
+      if (next.done) break;
+      if (!(next.value instanceof Uint8Array)) throw providerError("risk_provider_invalid_response");
+      length += next.value.byteLength;
+      if (length > maximumBytes) throw providerError("risk_provider_response_too_large");
+      // Copy into one fixed buffer, retaining neither unbounded chunk metadata
+      // nor a tiny view onto an upstream chunk's larger ArrayBuffer.
+      bytes.set(next.value, length - next.value.byteLength);
+    }
+    completed = true;
+    try {
+      return JSON.parse(bytes.subarray(0, length).toString("utf8"));
+    } catch {
+      throw providerError("risk_provider_invalid_response");
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    // A caller-visible deadline is enforced by the cache. Keep ownership of
+    // an ignored read/cancel until its original operation actually settles.
+    if (!completed) await cancelReader();
+    try { reader.releaseLock(); } catch {}
+  }
+}
+
+// Official reference: https://github.com/ipapi-is/ipapi#the-ip-api documents
+// anonymous access (1,000 requests/day), is_datacenter, is_proxy and is_vpn.
+// It does not document a residential-proxy flag. Do not infer one from an ISP.
+// This adapter makes no calls until explicitly enabled. The caller owns its
+// bounded cache, concurrency and timeout; failed attempts also consume budget.
+function createFreeIpIntelligenceProvider({
+  enabled = false,
+  provider = "ipapi.is",
+  fetch: fetchImpl = globalThis.fetch,
+  dailyBudget = 900,
+  maxResponseBytes = MAX_RESPONSE_BYTES,
+  now = () => performance.now(),
+} = {}) {
+  const budget = Number.isFinite(Number(dailyBudget))
+    ? Math.min(FREE_DAILY_LIMIT, Math.max(0, Math.floor(Number(dailyBudget)))) : 900;
+  const byteLimit = Number.isFinite(Number(maxResponseBytes))
+    ? Math.min(MAX_RESPONSE_BYTES, Math.max(1, Math.floor(Number(maxResponseBytes)))) : MAX_RESPONSE_BYTES;
+  const configured = provider === "ipapi.is" && typeof fetchImpl === "function";
+  const active = enabled === true && configured;
+  // At most 1,000 timestamps are retained, independent of unique visitor IPs.
+  const attempts = [];
+  let failureCode = null;
+
+  function prune() {
+    const instant = now();
+    while (attempts.length && instant - attempts[0] >= DAY_MS) attempts.shift();
+    return instant;
+  }
+
+  function getStatus() {
+    const instant = prune();
+    return {
+      enabled: active,
+      configured,
+      provider: "ipapi.is",
+      dailyBudget: budget,
+      used: attempts.length,
+      remaining: Math.max(0, budget - attempts.length),
+      resetAfterSec: attempts.length ? Math.max(0, Math.ceil((DAY_MS - (instant - attempts[0])) / 1000)) : 0,
+      quotaScope: "process",
+      failureCode,
+    };
+  }
+
+  async function lookup(ip, { signal } = {}) {
+    if (!active) return null;
+    try {
+      if (typeof ip !== "string" || ip.length > 45 || !isIP(ip) || ip.includes("%")) {
+        throw providerError("risk_provider_invalid_ip");
+      }
+      if (signal?.aborted) throw providerError("risk_provider_aborted");
+      const instant = prune();
+      if (attempts.length >= budget) throw providerError("risk_provider_budget_exhausted");
+      attempts.push(instant);
+      const endpoint = new URL("https://api.ipapi.is/");
+      endpoint.searchParams.set("q", ip);
+      // Do not race cancellation against this promise. If an injected fetch
+      // ignores AbortSignal, its cache slot must stay occupied until it settles.
+      const response = await fetchImpl(endpoint.href, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal,
+        redirect: "error",
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+      });
+      if (signal?.aborted) {
+        await discardBody(response);
+        throw providerError("risk_provider_aborted");
+      }
+      if (response?.redirected || (response?.status >= 300 && response.status < 400)) {
+        await discardBody(response);
+        throw providerError("risk_provider_redirect");
+      }
+      if (response?.status === 429) {
+        await discardBody(response);
+        throw providerError("risk_provider_rate_limited");
+      }
+      if (!response?.ok) {
+        await discardBody(response);
+        throw providerError("risk_provider_http_error");
+      }
+      const payload = await readBoundedJson(response, byteLimit, signal);
+      if (!payload || typeof payload !== "object" || Array.isArray(payload) || payload.error) {
+        throw providerError("risk_provider_invalid_response");
+      }
+      const booleanOrUnknown = value => typeof value === "boolean" ? value : null;
+      failureCode = null;
+      return {
+        hosting: booleanOrUnknown(payload.is_datacenter),
+        proxy: booleanOrUnknown(payload.is_proxy),
+        vpn: booleanOrUnknown(payload.is_vpn),
+        residentialProxy: null,
+        source: "ipapi.is",
+      };
+    } catch (error) {
+      // Only fixed adapter codes escape. In particular, fetch errors and JSON
+      // errors can include request URLs, IPs or response text; never expose them.
+      const code = error?.code;
+      failureCode = SAFE_CODES.has(code)
+        ? code : signal?.aborted ? "risk_provider_aborted" : "risk_provider_network";
+      throw providerError(failureCode);
+    }
+  }
+
+  return { lookup, getStatus };
+}
+
+module.exports = createFreeIpIntelligenceProvider;
