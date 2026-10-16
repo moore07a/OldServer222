@@ -346,6 +346,10 @@ const {
   stripOptionalUrlPrefix: (...args) => stripOptionalUrlPrefix(...args)
 });
 
+const createTrafficMetrics = require("./modules/runtime-utils/trafficMetrics.js");
+const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot } = createTrafficMetrics({
+  pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args)
+});
 const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
 const FORWARDER_AUTH_HEADER = "x-mds-forwarder-auth";
 const MDS_FORWARDER_AUTH_SECRET = String(
@@ -416,6 +420,9 @@ app.use((req, _res, next) => {
   }
   next();
 });
+
+// Observe all responses after path normalization, including early denials.
+app.use(trackTrafficMetrics);
 
 // ================== EARLY-EXIT MIDDLEWARE ==================
 app.use(verifyClaimedSearchBotMiddleware);
@@ -1425,6 +1432,7 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   getRuntimeResourceGauges,
   getRuntimeUsageSnapshot,
   getTrackedInFlightCount,
+  getTrafficMetricsSnapshot,
   handleRedirectCore,
   hash32,
   hashFirstSeg,
