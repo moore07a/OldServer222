@@ -63,6 +63,7 @@ function createCoreRoutes(dependencies) {
     getRuntimeResourceGauges,
     getRuntimeUsageSnapshot,
     getTrackedInFlightCount,
+    getTrafficMetricsSnapshot,
     handleRedirectCore,
     hash32,
     hashFirstSeg,
@@ -301,6 +302,15 @@ if (OPTIONAL_URL_PREFIX) {
 app.get("/healthz", handleLiveness);
 if (OPTIONAL_URL_PREFIX) {
   app.get(withOptionalUrlPrefix("/healthz"), handleLiveness);
+}
+
+const handleTrafficMetrics = (_req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  return res.json({ ok: true, ...getTrafficMetricsSnapshot() });
+};
+app.get("/admin/traffic-metrics", requireAdmin, handleTrafficMetrics);
+if (OPTIONAL_URL_PREFIX) {
+  app.get(withOptionalUrlPrefix("/admin/traffic-metrics"), requireAdmin, handleTrafficMetrics);
 }
 
 const handleTsClientLog = (req, res) => {
