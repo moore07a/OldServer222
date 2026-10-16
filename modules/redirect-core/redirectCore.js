@@ -81,6 +81,7 @@ function createRedirectCore(dependencies) {
     pathMatchesWithOptionalPrefix,
     pickScannerProfile,
     recordChallengeBypassAttempt,
+    recordChallengeEvent = () => {},
     recordOffenderSignals,
     recordScannerIp,
     renderScannerSafeHtmlForScanner,
@@ -949,6 +950,8 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
     };
   }
 
+  req._challengeMetricsVerified = true;
+
   const { limited, retryAfterMs } = await isRateLimited(identity.rateLimitKey || ip);
   if (limited) {
     if (retryAfterMs && Number.isFinite(retryAfterMs)) {
@@ -1218,6 +1221,20 @@ function validateAndRedirect(finalUrl, req, res, options = {}) {
 
     addLog(`[REDIRECT] ip=${safeLogValue(ip)} -> ${safeLogValue(finalUrl, URL_DISPLAY_MAX_LENGTH)}`);
     addSpacer();
+    if (req.method === "GET" && req._challengeMetricsVerified) {
+      let settled = !!(req.aborted || res.destroyed);
+      const abort = () => { settled = true; };
+      res.once("close", abort);
+      res.once("error", abort);
+      req.once("aborted", abort);
+      res.once("finish", () => {
+        if (settled) return;
+        settled = true;
+        if (res.statusCode === 302) {
+          try { recordChallengeEvent("redirected"); } catch {}
+        }
+      });
+    }
     return res.redirect(302, finalUrl);
   } catch (e) {
     addLog(`[URL] invalid ip=${safeLogValue(ip)} value="${safeLogValue((finalUrl || ""), URL_DISPLAY_MAX_LENGTH)}" err="${safeLogValue(e.message)}"`);

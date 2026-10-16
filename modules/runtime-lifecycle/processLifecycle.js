@@ -3,7 +3,7 @@
 module.exports = function createProcessLifecycle(dependencies) {
   const {
     LOG_LISTENERS, SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
-    buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter,
+    buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter, closeMetrics = async () => {},
     formatRuntimeCorrelationSuffix, getProcessRuntimeMetadata,
     getRuntimeCorrelationMetadata, logActiveRequestDiagnostics, openSockets,
     recordRuntimeIncident, runtimeStats, safeLogValue, server, summarizeError
@@ -81,15 +81,17 @@ module.exports = function createProcessLifecycle(dependencies) {
     }, SHUTDOWN_GRACE_MS);
 
     server.close(async () => {
-      clearTimeout(forceExitTimer);
-
       if (forcedShutdownTimedOut) {
         addLog(`[SHUTDOWN] server closed after grace timeout; preserving forced exit status (${correlation})`);
         return;
       }
 
       addLog(`[SHUTDOWN] server closed cleanly (${correlation})`);
+      try { await closeMetrics(); }
+      catch (_) { addLog("[SHUTDOWN] metrics cleanup did not complete"); }
       await closeLogFileWriter(Math.min(2000, SHUTDOWN_GRACE_MS));
+      if (forcedShutdownTimedOut) return;
+      clearTimeout(forceExitTimer);
       process.exit(0);
     });
 

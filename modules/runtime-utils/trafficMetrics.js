@@ -5,6 +5,7 @@ const { performance } = require("node:perf_hooks");
 const SAMPLE_LIMIT = 512;
 const KINDS = ["operational", "head", "prefetch", "get", "other"];
 const STATUS_CLASSES = ["1xx", "2xx", "3xx", "4xx", "5xx", "other"];
+const CHALLENGE_EVENTS = ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"];
 const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug"];
 const OPERATIONAL_PATHS = [
   "/health", "/readyz", "/healthz", "/livez",
@@ -15,7 +16,7 @@ const OPERATIONAL_PATHS = [
   "/_collect", "/_interact", "/_analytics.gif", "/__hp.gif"
 ];
 
-function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => performance.now() } = {}) {
+function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => performance.now(), onRequest = () => {}, onChallengeEvent = () => {} } = {}) {
   const startedAt = new Date().toISOString();
   const matchesPath = pathMatchesWithOptionalPrefix || ((pathValue, expected, { allowChildren }) => (
     pathValue === expected || (allowChildren && pathValue.startsWith(`${expected}/`))
@@ -37,6 +38,14 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
 
   const total = createCounters();
   const byKind = Object.fromEntries(KINDS.map((kind) => [kind, createCounters()]));
+  const challenges = Object.fromEntries(CHALLENGE_EVENTS.map((event) => [event, 0]));
+
+  function recordChallengeEvent(event) {
+    if (!Object.hasOwn(challenges, event)) return false;
+    challenges[event] += 1;
+    try { onChallengeEvent(event); } catch {}
+    return true;
+  }
 
   function classifyRequest(req) {
     const pathValue = String(req.path || req.originalUrl || req.url || "/")
@@ -67,7 +76,8 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
   }
 
   function middleware(req, res, next) {
-    const counters = byKind[classifyRequest(req)];
+    const kind = classifyRequest(req);
+    const counters = byKind[kind];
     const started = now();
     for (const group of [total, counters]) {
       group.requests += 1;
@@ -87,6 +97,7 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
         if (completed) recordCompletion(group, statusClass, duration);
         else group.aborted += 1;
       }
+      try { onRequest({ kind, completed, statusClass, durationMs: duration }); } catch {}
     }
 
     res.on("finish", () => settle(true));
@@ -124,11 +135,12 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
       scope: "current_process",
       startedAt,
       total: snapshotCounters(total),
-      byKind: Object.fromEntries(KINDS.map((kind) => [kind, snapshotCounters(byKind[kind])]))
+      byKind: Object.fromEntries(KINDS.map((kind) => [kind, snapshotCounters(byKind[kind])])),
+      challenges: { ...challenges }
     };
   }
 
-  return { middleware, getSnapshot };
+  return { middleware, getSnapshot, recordChallengeEvent };
 }
 
 module.exports = createTrafficMetrics;
