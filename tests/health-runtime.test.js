@@ -93,3 +93,42 @@ test("health runtime keeps warning lag independent from a lower timer cap", () =
     assert.equal(runtime.EVENT_LOOP_LAG_WARN_MS, 500);
   });
 });
+
+test("healthy provider checks still emit due heartbeats, update timestamps, and clear inflight state", async () => {
+  const health = { ok: true, inflight: false, okStreak: 2, failStreak: 0, lastHeartbeat: 0 };
+  const runtimeStats = { turnstileChecks: 0 };
+  const logs = [];
+  let providerCalls = 0;
+  let finishProvider;
+  const runtime = createRuntime({
+    _health: health,
+    runtimeStats,
+    addLog(message) { logs.push(message); },
+    fetchWithTimeout(url, options) {
+      providerCalls += 1;
+      assert.equal(url, "https://challenges.cloudflare.com/turnstile/v0/api.js");
+      assert.equal(options.method, "HEAD");
+      return new Promise(resolve => { finishProvider = resolve; });
+    }
+  });
+  const startedAt = Date.now();
+  const pending = runtime.checkTurnstileReachable();
+  assert.equal(health.inflight, true, "an outstanding provider check is tracked");
+  await runtime.checkTurnstileReachable();
+  assert.equal(providerCalls, 1, "a pending check prevents overlapping provider requests");
+  finishProvider({ ok: true, status: 200 });
+  await pending;
+  const finishedAt = Date.now();
+
+  assert.equal(health.inflight, false);
+  assert.equal(health.ok, true);
+  assert.equal(health.okStreak, 3);
+  assert.equal(health.failStreak, 0);
+  assert.deepEqual(logs, ["[HEALTH] heartbeat status=ok okStreak=3 failStreak=0"]);
+  assert.ok(health.lastHeartbeat >= startedAt && health.lastHeartbeat <= finishedAt);
+  assert.equal(runtimeStats.turnstileChecks, 1);
+  const checkedAt = Date.parse(runtimeStats.lastTurnstileCheckAt);
+  assert.ok(checkedAt >= startedAt && checkedAt <= finishedAt);
+  assert.ok(runtimeStats.lastTurnstileLatencyMs >= 0);
+  assert.equal(runtimeStats.lastTurnstileError, null);
+});

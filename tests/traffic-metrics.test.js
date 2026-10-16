@@ -73,6 +73,30 @@ test("traffic metrics use the supplied optional-prefix matcher with normalized p
   assert.equal(metrics.getSnapshot().byKind.get.completed, 1);
 });
 
+test("retired log URLs and their subpaths remain operational without classifying similar visitor paths", () => {
+  const metrics = createHarness({
+    pathMatchesWithOptionalPrefix(path, expected, { allowChildren }) {
+      const normalized = path.replace(/^\/campaign(?=\/)/, "");
+      return normalized === expected || (allowChildren && normalized.startsWith(`${expected}/`));
+    }
+  });
+  for (const prefix of ["", "/campaign"]) {
+    for (const route of ["/view-log", "/view-log-live", "/stream-log"]) {
+      for (const suffix of ["", "/", "/unused/path"]) {
+        for (const method of ["GET", "HEAD", "POST", "OPTIONS"]) {
+          metrics.start({ path: `${prefix}${route}${suffix}?token=ignored`, method, status: 404, headers: { purpose: "prefetch" } }).finish();
+        }
+      }
+      metrics.start({ path: `${prefix}${route}-extra` }).finish();
+    }
+  }
+  const snapshot = metrics.getSnapshot();
+  assert.equal(snapshot.byKind.operational.completed, 72);
+  assert.equal(snapshot.byKind.operational.byStatusClass["4xx"], 72);
+  assert.equal(snapshot.byKind.get.completed, 6);
+  for (const kind of ["head", "prefetch", "other"]) assert.equal(snapshot.byKind[kind].requests, 0);
+});
+
 test("utility routes and their prefixed variants do not inflate ordinary GET metrics", () => {
   const metrics = createHarness({
     pathMatchesWithOptionalPrefix(path, expected, { allowChildren }) {

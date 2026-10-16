@@ -6,10 +6,11 @@ const SAMPLE_LIMIT = 512;
 const KINDS = ["operational", "head", "prefetch", "get", "other"];
 const STATUS_CLASSES = ["1xx", "2xx", "3xx", "4xx", "5xx", "other"];
 const CHALLENGE_EVENTS = ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"];
-const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug"];
+// Include retired log paths so their rejected child paths are not visitor traffic.
+const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug", "/stream-log", "/view-log", "/view-log-live"];
 const OPERATIONAL_PATHS = [
   "/health", "/readyz", "/healthz", "/livez",
-  "/stream-log", "/view-log", "/view-log-live", "/geo-debug",
+  "/geo-debug",
   "/robots.txt", "/sitemap.xml", "/favicon.ico",
   "/ads.txt", "/.well-known/security.txt",
   "/ts-client-log", "/turnstile-sitekey", "/api/v1/status",

@@ -163,7 +163,8 @@ test('private traffic metrics include early responses and separate HTTP request 
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: expired })
   });
   assert.equal(JSON.parse(expiredResult.text).error, 'Payload expired');
-  const outcomes = JSON.parse((await request('/admin/traffic-metrics', authenticated)).text).challenges;
+  const beforeRetirementChecks = JSON.parse((await request('/admin/traffic-metrics', authenticated)).text);
+  const outcomes = beforeRetirementChecks.challenges;
   assert.equal(outcomes.shown, 1, 'the fragment POST counts once; HEAD and rejected requests do not');
   assert.equal(outcomes.payloadExpired, 1);
   assert.equal(outcomes.passed, 0);
@@ -187,19 +188,31 @@ test('private traffic metrics include early responses and separate HTTP request 
     assert.match(script.text, /function createTrafficPanelController/);
     assert.doesNotMatch(script.text, /EventSource|localStorage|sessionStorage/);
 
-    for (const legacy of ['/view-log', '/view-log-live']) {
-      const retired = await request(`${prefix}${legacy}?token=legacy-secret`);
-      assert.equal(retired.response.status, 302);
-      assert.equal(retired.response.headers.get('location'), '/campaign/admin/traffic-panel');
-      assert.doesNotMatch(retired.text, /legacy-secret|event-stream/);
+    for (const legacy of ['/view-log', '/view-log-live', '/stream-log']) {
+      for (const suffix of ['', '/', '/child']) {
+        for (const method of ['GET', 'HEAD', 'POST', 'OPTIONS']) {
+          const route = `${prefix}${legacy}${suffix}?token=legacy-secret`;
+          const headers = { origin: 'https://external.example' };
+          if (method === 'POST') headers['content-type'] = 'application/json';
+          const retired = await request(route, { method, headers, ...(method === 'POST' ? { body: '{' } : {}) });
+          assert.equal(retired.response.status, 404, `${method} ${route} is retired before parsing or CORS`);
+          assert.equal(retired.response.headers.get('location'), null);
+          assert.equal(retired.response.headers.get('link'), null);
+          assert.equal(retired.response.headers.get('access-control-allow-origin'), null);
+          assert.doesNotMatch(retired.response.headers.get('content-type') || '', /event-stream/);
+          assert.doesNotMatch(retired.text, /legacy-secret|event-stream|traffic-panel/);
+          if (method === 'HEAD') assert.equal(retired.text, '');
+        }
+      }
     }
-    const retiredStream = await request(`${prefix}/stream-log?token=legacy-secret`);
-    assert.equal(retiredStream.response.status, 204, 'EventSource receives a finite response that stops retries');
-    assert.equal(retiredStream.text, '');
-    assert.doesNotMatch(retiredStream.response.headers.get('content-type') || '', /event-stream/);
   }
   assert.equal((await request('/admin/traffic-metrics?token=legacy-secret')).response.status, 401);
-  const resources = JSON.parse((await request('/admin/traffic-metrics', authenticated)).text).runtime;
+  const afterRetirementChecks = JSON.parse((await request('/admin/traffic-metrics', authenticated)).text);
+  for (const kind of ['get', 'head', 'prefetch', 'other']) {
+    assert.deepEqual(afterRetirementChecks.byKind[kind], beforeRetirementChecks.byKind[kind], 'retired paths never count as visitor traffic');
+  }
+  assert.deepEqual(afterRetirementChecks.challenges, outcomes, 'retired paths never enter challenge or destination handling');
+  const resources = afterRetirementChecks.runtime;
   assert.ok(resources.memory.rssMb > 0);
   assert.ok(resources.memory.heapUsedMb > 0);
   assert.equal(resources.resources.sseListeners, 0);
@@ -218,11 +231,29 @@ test('private traffic metrics include early responses and separate HTTP request 
     assert.equal(await cpuUsageReads(), cpuReads, 'panel memory reads must not advance health CPU sampling');
   }
   // Readiness may report 503 before the provider heartbeat succeeds; it still
-  // samples CPU. Liveness remains independent of provider availability.
-  for (const [route, statuses] of [['/health', [200, 503]], ['/campaign/healthz', [200]]]) {
-    const result = await request(route);
-    assert.ok(statuses.includes(result.response.status));
-    assert.equal(typeof JSON.parse(result.text).stats.cpu.processPercent, 'number');
-    assert.equal(await cpuUsageReads(), ++cpuReads, 'health checks must continue taking CPU samples');
+  // samples CPU. Both liveness routes remain independent of provider availability.
+  for (const prefix of ['', '/campaign']) {
+    for (const healthPath of ['/health', '/readyz', '/healthz', '/livez']) {
+      const route = `${prefix}${healthPath}`;
+      const result = await request(route);
+      const readiness = healthPath === '/health' || healthPath === '/readyz';
+      assert.ok((readiness ? [200, 503] : [200]).includes(result.response.status), `${route} keeps its existing health status`);
+      const body = JSON.parse(result.text);
+      assert.equal(body.ok, result.response.status === 200);
+      if (healthPath === '/livez') {
+        assert.equal(typeof body.ts, 'number');
+        assert.equal(await cpuUsageReads(), cpuReads, 'minimal liveness does not sample CPU');
+      } else {
+        assert.equal(typeof body.stats.cpu.processPercent, 'number');
+        assert.ok(body.stats.memory.rssMb > 0);
+        assert.equal(body.stats.resources.sseListeners, 0);
+        assert.equal(typeof body.uptimeSec, 'number');
+        if (readiness) {
+          assert.equal(typeof body.checks.turnstile.okStreak, 'number');
+          assert.ok(Object.hasOwn(body.checks.turnstile, 'lastHeartbeat'));
+        } else assert.equal(typeof body.ts, 'number');
+        assert.equal(await cpuUsageReads(), ++cpuReads, 'health checks must continue taking CPU samples');
+      }
+    }
   }
 });

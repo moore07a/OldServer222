@@ -7,7 +7,6 @@ require("./trafficPanelClient.js");
 const clientSource = fs.readFileSync(require.resolve("./trafficPanelClient.js"), "utf8");
 
 function registerTrafficPanelRoutes({ app, withOptionalUrlPrefix, optionalPrefix = "" }) {
-  const panelPath = withOptionalUrlPrefix("/admin/traffic-panel");
   const scriptPath = withOptionalUrlPrefix("/admin/traffic-panel.js");
   const metricsPath = withOptionalUrlPrefix("/admin/traffic-metrics");
 
@@ -30,21 +29,6 @@ function registerTrafficPanelRoutes({ app, withOptionalUrlPrefix, optionalPrefix
   app.get(paths("/admin/traffic-panel.js"), (_req, res) => {
     res.setHeader("Cache-Control", "private, no-store");
     res.type("application/javascript").send(clientSource);
-  });
-
-  for (const route of ["/view-log", "/view-log-live"]) {
-    app.get(paths(route), (_req, res) => {
-      res.setHeader("Cache-Control", "private, no-store");
-      res.setHeader("Referrer-Policy", "no-referrer");
-      return res.redirect(302, panelPath);
-    });
-  }
-
-  app.get(paths("/stream-log"), (_req, res) => {
-    res.setHeader("Cache-Control", "private, no-store");
-    res.setHeader("Link", `<${panelPath}>; rel="alternate"`);
-    // HTTP 204 tells EventSource clients to stop reconnecting.
-    return res.status(204).end();
   });
 }
 

@@ -311,10 +311,10 @@ async function main() {
     started = Date.now();
     await checked('/admin/traffic-panel', 200);
     await checked('/admin/traffic-panel.js', 200);
-    await checked('/view-log?token=discard-this-test-value', 302);
-    await checked('/view-log-live?token=discard-this-test-value', 302);
-    await checked('/stream-log', 204, { authenticated: true });
-    await checked('/stream-log', 204);
+    await checked('/view-log?token=discard-this-test-value', 404);
+    await checked('/view-log-live?token=discard-this-test-value', 404);
+    await checked('/stream-log', 404, { authenticated: true });
+    await checked('/stream-log', 404);
     await checked('/admin/traffic-metrics', 401);
     metricsBefore = await pollPanel();
     if (redisUrl) {
@@ -327,7 +327,7 @@ async function main() {
       ['/robots.txt', 200], ['/r', 400], ['/ads.txt', 200],
       ['/admin/traffic-panel', 200, { authenticated: true }], ['/r', 400], ['/admin/traffic-panel.js', 200, { authenticated: true }],
       ['/challenge-fragment', 200, { method: 'POST', body: challengeBody }],
-      ['/.well-known/security.txt', 200], ['/r', 400], ['/stream-log', 204]
+      ['/.well-known/security.txt', 200], ['/r', 400], ['/stream-log', 404]
     ];
     interval(async () => {
       if (Date.now() >= end) return;

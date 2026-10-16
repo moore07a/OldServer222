@@ -448,6 +448,15 @@ app.use((req, _res, next) => {
 // Observe all responses after path normalization, including early denials.
 app.use(trackTrafficMetrics);
 
+// Retired log URLs never enter scanners, body parsers, or redirect handling.
+const retiredLogPaths = ["/view-log", "/view-log-live", "/stream-log"];
+app.use((req, res, next) => {
+  if (!retiredLogPaths.some(route => pathMatchesWithOptionalPrefix(req.path, route))) return next();
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  return res.status(404).type("text/plain").send("Not Found");
+});
+
 // ================== EARLY-EXIT MIDDLEWARE ==================
 app.use(verifyClaimedSearchBotMiddleware);
 
@@ -584,8 +593,7 @@ app.use((req, res, next) => {
   // Skip internal/health paths to avoid false positives on monitoring traffic.
   const p = String(req.path || "/");
   if (
-    p === "/health" || p === "/healthz" || p === "/readyz" || p === "/livez" ||
-    p.startsWith("/stream-log") || p.startsWith("/view-log")
+    p === "/health" || p === "/healthz" || p === "/readyz" || p === "/livez"
   ) {
     return next();
   }

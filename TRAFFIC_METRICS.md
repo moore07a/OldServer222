@@ -26,13 +26,23 @@ latency percentiles and runtime resources always describe the responding
 process and are labelled accordingly. Redis errors and pending observations
 remain visible so a connected socket is not mistaken for durable delivery.
 
-The old `/view-log` and `/view-log-live` URLs redirect to the panel without
-copying query tokens. `/stream-log` returns a finite HTTP 204 response, which
-tells EventSource clients to stop reconnecting. The standalone `live-log.html`
-viewer, log stream listeners, broadcasts, heartbeats, and backlog buffers have
-been removed. Stdout/file logging, bounded log history, crash incidents, health
-routes, and authenticated diagnostic APIs remain available. The compatibility
-health gauge `sseListeners` is always zero.
+The old `/view-log`, `/view-log-live`, and `/stream-log` URLs return `404 Not Found`,
+including their optional-prefix, trailing-slash, and child paths, for every HTTP
+method. They remain reserved so old monitoring requests cannot enter redirect
+or challenge handling or count as visitor traffic. They do not redirect to the
+panel or expose a log stream. The standalone `live-log.html` viewer, stream
+listeners, broadcasts, stream heartbeats, and backlog replay have been removed.
+
+The independent health checker and its `[HEALTH] heartbeat` logs remain active.
+`/health` and `/readyz` still report dependency readiness, including `503` when
+a dependency check fails; `/healthz` and `/livez` still report liveness. Their
+optional-prefix variants remain available. The compatibility health gauge
+`sseListeners` is always zero.
+
+The panel summarizes traffic; use the hosting platform's stdout logs for raw
+request and error details, or configured file logging and the authenticated
+`/__debug/log-file` and `/__debug/runtime-incidents` diagnostics. Bounded log
+history, crash incidents, and the existing logging configuration remain intact.
 
 ## Read the JSON summary
 
@@ -189,7 +199,8 @@ npm test
 The metrics tests cover request groups, optional URL prefixes, early rejections,
 single-event accounting, premature disconnects, bounded samples, percentile
 calculations, snapshot isolation, challenge outcomes, authenticated real HTTP
-routes, Redis retry behavior, and graceful shutdown.
+routes, retired-path rejection, preserved health endpoints and heartbeat logs,
+Redis retry behavior, and graceful shutdown.
 
 To run the additional integration checks against an isolated real Redis:
 
