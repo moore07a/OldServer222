@@ -2,7 +2,7 @@
 
 module.exports = function createProcessLifecycle(dependencies) {
   const {
-    LOG_LISTENERS, SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
+    SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
     buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter, closeMetrics = async () => {},
     formatRuntimeCorrelationSuffix, getProcessRuntimeMetadata,
     getRuntimeCorrelationMetadata, logActiveRequestDiagnostics, openSockets,
@@ -62,12 +62,6 @@ module.exports = function createProcessLifecycle(dependencies) {
     clearBackgroundTasks();
     activeTrackedRequests.clear();
     runtimeStats.inFlightRequests = 0;
-
-    // End SSE log listeners before waiting on server.close(); long-lived streams can
-    // otherwise keep the server open indefinitely and force timeout exits.
-    for (const listenerRes of LOG_LISTENERS) {
-      try { listenerRes.end(); } catch {}
-    }
 
     const forceExitTimer = setTimeout(async () => {
       forcedShutdownTimedOut = true;

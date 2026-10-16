@@ -3,7 +3,7 @@
 ## 1) Runtime gauges now available
 The app exposes these in `GET /health` and `GET /healthz` under `stats.resources`:
 - `openSockets`
-- `sseListeners`
+- `sseListeners` (compatibility field, always zero after retiring the stream)
 - `logFileQueueLines`
 - `logFileQueueBytes`
 - `logFileDroppedLines`
@@ -129,7 +129,6 @@ LOG_FILE_QUEUE_MAX_LINES=5000
 LOG_FILE_QUEUE_MAX_BYTES=2097152
 LOG_FILE_QUEUE_WARN_BYTES=1048576
 OPEN_SOCKETS_WARN_THRESHOLD=400
-SSE_LISTENERS_WARN_THRESHOLD=120
 SHUTDOWN_GRACE_MS=10000
 ```
 

@@ -47,7 +47,6 @@ function harness({ closeMetrics, closeLogFileWriter = async () => {} } = {}) {
   const runtimeStats = { shutdownSignals: 0, inFlightRequests: 1 };
   const activeTrackedRequests = new Map([["request", {}]]);
   const dependencies = {
-    LOG_LISTENERS: new Set([{ end: () => events.push("sse:end") }]),
     SHUTDOWN_GRACE_MS: 1500,
     activeTrackedRequests,
     addLog() {},
@@ -109,7 +108,7 @@ test("shutdown drains HTTP before metrics and keeps the deadline until all clean
     closeLogFileWriter: () => { logsStarted.resolve(); return logs.promise; }
   });
   await lifecycle.gracefulShutdown("SIGTERM");
-  assert.deepEqual(lifecycle.events, ["background:clear", "sse:end", "deadline:start", "server:drain", "server:closeIdle"]);
+  assert.deepEqual(lifecycle.events, ["background:clear", "deadline:start", "server:drain", "server:closeIdle"]);
   assert.equal(lifecycle.activeTrackedRequests.size, 0);
   assert.equal(lifecycle.runtimeStats.inFlightRequests, 0);
 
@@ -128,7 +127,7 @@ test("shutdown drains HTTP before metrics and keeps the deadline until all clean
   assert.deepEqual(lifecycle.exits, []);
   logs.resolve();
   await draining;
-  assert.deepEqual(lifecycle.events.slice(5), ["metrics:start", "metrics:done", "logs:start", "logs:done", "deadline:clear", "exit:0"]);
+  assert.deepEqual(lifecycle.events.slice(4), ["metrics:start", "metrics:done", "logs:start", "logs:done", "deadline:clear", "exit:0"]);
   assert.deepEqual(lifecycle.exits, [0]);
   assert.equal(lifecycle.deadlines.size, 0);
 });
