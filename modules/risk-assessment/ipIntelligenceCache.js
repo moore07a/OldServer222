@@ -69,7 +69,7 @@ function createIpIntelligenceCache({
     concurrency: integer(concurrency, 2, 2), timeoutMs: integer(timeoutMs, 800, 2147483647)
   };
   const counters = {
-    cacheHits: 0, negativeCacheHits: 0, lookups: 0, failed: 0, timeouts: 0,
+    cacheHits: 0, negativeCacheHits: 0, lookups: 0, failed: 0, timeouts: 0, unknownResponses: 0,
     queueDropped: 0, deduplicated: 0, skipped: 0, expired: 0, evicted: 0, cancelled: 0
   };
   const cache = new Map();
@@ -79,6 +79,7 @@ function createIpIntelligenceCache({
   let closed = false;
   let scheduled = false;
   let lastError = null;
+  let lastUnknownReason = null;
 
   function empty(state) {
     return { state, hosting: null, vpn: null, proxy: null, residentialProxy: null, source: null };
@@ -107,6 +108,7 @@ function createIpIntelligenceCache({
     if (closed || job.timedOut) return;
     counters.failed += 1;
     lastError = code;
+    lastUnknownReason = null;
     writeCache(job.ip, empty("unknown"), limits.negativeTtlMs);
   }
 
@@ -121,15 +123,21 @@ function createIpIntelligenceCache({
     try {
       const value = await lookup(job.ip, { signal: job.controller.signal });
       if (closed || job.timedOut) return;
-      if (!value || typeof value !== "object" || !FLAG_NAMES.some(name => typeof value[name] === "boolean")) {
+      const explicitUnknown = value && typeof value === "object" && !Array.isArray(value) && value.state === "unknown"
+        && value.reason === "indicators_unavailable" && FLAG_NAMES.every(name => value[name] == null);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || (value.state === "unknown" && !explicitUnknown)
+        || (!explicitUnknown && !FLAG_NAMES.some(name => typeof value[name] === "boolean"))) {
         fail(job, "invalid_response");
         return;
       }
-      const result = empty("known");
+      const result = empty(explicitUnknown ? "unknown" : "known");
       for (const name of FLAG_NAMES) result[name] = typeof value[name] === "boolean" ? value[name] : null;
       result.source = typeof value.source === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(value.source) ? value.source : null;
-      writeCache(job.ip, result, limits.ttlMs);
+      writeCache(job.ip, result, explicitUnknown ? limits.negativeTtlMs : limits.ttlMs);
       lastError = null;
+      lastUnknownReason = explicitUnknown ? "indicators_unavailable" : null;
+      if (explicitUnknown) counters.unknownResponses += 1;
     } catch (_) {
       fail(job, "lookup_failed");
     } finally {
@@ -207,7 +215,7 @@ function createIpIntelligenceCache({
     }
     return {
       enabled: usable, configured, closed, ...counters, active: activeJobs.size,
-      queued: queue.length, cacheEntries: cache.size, lastError, limits: { ...limits }
+      queued: queue.length, cacheEntries: cache.size, lastError, lastUnknownReason, limits: { ...limits }
     };
   }
 

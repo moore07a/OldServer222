@@ -241,3 +241,219 @@ test("real Redis shares risk totals, expires its keys, and deduplicates uncertai
   assert.equal(campaign(await second.getSnapshot()).requests, 0);
   assert.equal((await second.recordConversion(event)).duplicate, true);
 });
+
+test("checkpoint state restores current-window counters, bitmap estimates and conversion dedupe once", async t => {
+  let clock = 300000;
+  let dirty = 0;
+  const config = { campaignIds: ["summer"], namespace: "checkpoint-test", windowSec: 10, now: () => clock };
+  const first = createStore({ ...config, onDirty: () => { dirty++; } });
+  const restored = createStore(config);
+  t.after(() => Promise.all([first.close(), restored.close()]));
+  first.recordRequest({ campaignId: "summer", sourceHash: hash("source"), challengePassed: true });
+  first.recordRequest({ campaignId: "unknown", sourceHash: hash("other"), proxy: true });
+  const event = { campaignId: "summer", eventIdHash: hash("trusted-event") };
+  await first.recordConversion(event);
+  assert.equal(dirty, 3);
+  const saved = JSON.parse(JSON.stringify(first.exportState()));
+  assert.equal(saved.dedupe.length, 1);
+  assert.ok(!JSON.stringify(saved).includes("trusted-event"));
+  assert.equal(restored.restoreState(saved), true);
+  assert.equal(restored.restoreState(saved), false);
+  assert.deepEqual((await restored.getSnapshot()).campaigns, (await first.getSnapshot()).campaigns);
+  assert.equal((await restored.recordConversion(event)).duplicate, true);
+  saved.campaigns[0].requests = 999;
+  saved.dedupe.length = 0;
+  assert.equal(campaign(await restored.getSnapshot()).requests, 1, "restore takes detached fixed-field copies");
+  assert.equal((await restored.recordConversion(event)).duplicate, true);
+  const exported = restored.exportState();
+  clock += 10000;
+  const nextWindow = createStore(config);
+  t.after(() => nextWindow.close());
+  assert.equal(nextWindow.restoreState(exported), true);
+  assert.equal(campaign(await nextWindow.getSnapshot()).requests, 0, "past-window counters are discarded");
+  assert.equal((await nextWindow.recordConversion(event)).duplicate, true, "24h retry protection crosses window boundaries");
+  clock += 86400000;
+  assert.equal(nextWindow.exportState().dedupe.length, 0, "expired hashes are not checkpointed");
+});
+
+test("checkpoint restore rejects malformed, oversized or mismatched state atomically", async t => {
+  const config = { campaignIds: ["summer"], namespace: "restore-validation", now: () => 300000, maxLocalConversionIds: 2 };
+  const original = createStore(config);
+  t.after(() => original.close());
+  original.recordRequest({ campaignId: "summer", sourceHash: hash("one") });
+  const state = original.exportState();
+  const mutations = [
+    value => { value.version = 99; }, value => { value.namespace = "invalid{namespace}"; },
+    value => { value.windowSec = 9; }, value => { value.windowStartedAt = 900000; },
+    value => { value.campaigns[0].requests = -1; }, value => { value.campaigns[0].proxy = 2; },
+    value => { value.campaigns[0].id = "unsafe/id"; }, value => { value.campaigns[1] = value.campaigns[0]; },
+    value => { value.campaigns[0].bitmap = "x".repeat(684); }, value => { value.campaigns[0].bitmap = ""; },
+    value => { value.dedupe = Array(3).fill(["summer", hash("event"), 300000]); },
+    value => { value.dedupe = [["unsafe/id", hash("event"), 300000]]; },
+    value => { value.dedupe = [["summer", "raw-id", 300000]]; },
+    value => { value.dedupe = [["summer", hash("event"), 300001]]; },
+    value => { value.dedupe = Array(2).fill(["summer", hash("event"), 300000]); }
+  ];
+  for (const mutate of mutations) {
+    const copy = JSON.parse(JSON.stringify(state));
+    mutate(copy);
+    const store = createStore(config);
+    t.after(() => store.close());
+    assert.equal(store.restoreState(copy), false);
+    assert.equal(campaign(await store.getSnapshot()).requests, 0, "invalid input changes no counters");
+    assert.equal(store.exportState().dedupe.length, 0);
+  }
+  const used = createStore(config);
+  t.after(() => used.close());
+  used.recordRequest({ campaignId: "summer" });
+  assert.equal(used.restoreState(state), false, "restore cannot overwrite live observations");
+});
+
+test("durable conversions wait for the checkpoint and retain retry protection through restart and shutdown", async t => {
+  let resolveWrite;
+  let saved;
+  let calls = 0;
+  let first;
+  const config = { campaignIds: ["summer"], namespace: "durable-conversions", now: () => 300000 };
+  const commit = async () => {
+    calls++;
+    saved = JSON.parse(JSON.stringify(first.exportState()));
+    await new Promise(resolve => { resolveWrite = resolve; });
+    return true;
+  };
+  first = createStore({ ...config, commit });
+  t.after(() => first.close());
+  const event = { campaignId: "summer", eventIdHash: hash("order") };
+  let acknowledged = false;
+  const pending = first.recordConversion(event).then(result => { acknowledged = true; return result; });
+  await immediate();
+  assert.equal(calls, 1);
+  assert.equal(acknowledged, false);
+  const inProgress = await first.getSnapshot();
+  assert.equal(inProgress.scope, "disk");
+  assert.equal(inProgress.storage.backend, "disk");
+  assert.equal(inProgress.storage.pendingOperations, 1);
+  assert.equal(campaign(inProgress).conversions, 1);
+  resolveWrite();
+  assert.deepEqual(await pending, { accepted: true, duplicate: false, scope: "disk" });
+  await first.close();
+  assert.equal(first.exportState().dedupe.length, 1, "shutdown retains state for the final aggregate checkpoint");
+  const restarted = createStore({ ...config, commit: async () => true });
+  t.after(() => restarted.close());
+  assert.equal(restarted.restoreState(saved), true);
+  const duplicates = await Promise.all(Array.from({ length: 3 }, () => restarted.recordConversion(event)));
+  assert.ok(duplicates.every(result => result.accepted && result.duplicate));
+  assert.equal(campaign(await restarted.getSnapshot()).conversions, 1);
+});
+
+test("disk readiness and commit failures reject conversions while preserving uncertain markers for retry", async t => {
+  let ready = false;
+  let persisted = false;
+  let writes = 0;
+  const store = createStore({ campaignIds: ["summer"], now: () => 300000, persistenceReady: () => ready,
+    commit: async () => { writes++; return persisted; } });
+  t.after(() => store.close());
+  const event = { campaignId: "summer", eventIdHash: hash("event") };
+  assert.deepEqual(await store.recordConversion(event), { accepted: false, reason: "unavailable" });
+  const initial = await store.getSnapshot();
+  assert.equal(initial.scope, "unavailable");
+  assert.equal(initial.storage.backend, "disk");
+  assert.equal(initial.storage.fallbackScope, "current_process");
+  assert.equal(campaign(initial).conversions, 0);
+  assert.equal(writes, 0);
+  ready = true;
+  assert.deepEqual(await store.recordConversion(event), { accepted: false, reason: "unavailable" });
+  assert.equal(store.getStatus().uncertainConversions, 1);
+  assert.equal(store.getStatus().lastError, "commit_failed");
+  persisted = true;
+  assert.deepEqual(await store.recordConversion(event), { accepted: true, duplicate: true, scope: "disk" });
+  assert.equal(writes, 2);
+  assert.equal(campaign(await store.getSnapshot()).conversions, 1);
+});
+
+test("disk conversion queue is bounded and a stalled checkpoint does not block reads or accumulate writes", async t => {
+  let settle;
+  let writes = 0;
+  const store = createStore({ campaignIds: ["summer"], now: () => 300000, operationTimeoutMs: 30,
+    commit: () => { writes++; return new Promise(resolve => { settle = resolve; }); } });
+  t.after(() => store.close());
+  const requests = Array.from({ length: 40 }, (_, index) => store.recordConversion({ campaignId: "summer", eventIdHash: hash(index) }));
+  assert.equal(store.getStatus().pendingOperations, 32);
+  assert.equal(store.getStatus().queueLimit, 32);
+  const results = await Promise.all(requests);
+  assert.equal(results.filter(result => result.reason === "capacity").length, 8);
+  assert.equal(results.filter(result => result.reason === "unavailable").length, 32);
+  assert.equal(writes, 1);
+  assert.equal(store.getStatus().uncertainConversions, 1);
+  const report = await store.getSnapshot();
+  assert.equal(report.scope, "unavailable");
+  assert.equal(report.storage.pendingOperations, 1);
+  assert.equal((await store.recordConversion({ campaignId: "summer", eventIdHash: hash("late") })).reason, "unavailable");
+  assert.equal(writes, 1);
+  settle(true);
+  await immediate();
+  assert.equal(store.getStatus().pendingOperations, 0);
+  assert.equal((await store.getSnapshot()).scope, "disk");
+});
+
+test("checkpoint migration tolerates campaign and window changes without losing retry protection", async t => {
+  const config = { now: () => 300000, namespace: "campaign-migration", windowSec: 300 };
+  const first = createStore({ ...config, campaignIds: ["summer", "removed"] });
+  t.after(() => first.close());
+  const event = { campaignId: "removed", eventIdHash: hash("conversion") };
+  first.recordRequest({ campaignId: "summer", sourceHash: hash("source") });
+  first.recordRequest({ campaignId: "removed" });
+  await first.recordConversion(event);
+  const changed = createStore({ ...config, campaignIds: ["summer", "added"] });
+  t.after(() => changed.close());
+  assert.equal(changed.restoreState(first.exportState()), true);
+  assert.equal(campaign(await changed.getSnapshot(), "summer").requests, 1);
+  assert.equal(campaign(await changed.getSnapshot(), "added").requests, 0);
+  assert.equal(changed.exportState().dedupe.length, 1, "removed IDs retain bounded 24h dedupe entries");
+  const readded = createStore({ ...config, windowSec: 10, campaignIds: ["summer", "removed"] });
+  t.after(() => readded.close());
+  assert.equal(readded.restoreState(changed.exportState()), true);
+  assert.equal(campaign(await readded.getSnapshot(), "summer").requests, 0, "changed window configuration starts fresh counters");
+  assert.equal((await readded.recordConversion(event)).duplicate, true);
+});
+
+test("valid namespace changes reset campaign hashes without rejecting the enclosing aggregate checkpoint", async t => {
+  const config = { now: () => 300000, campaignIds: ["summer"] };
+  const previous = createStore({ ...config, namespace: "old-risk" });
+  t.after(() => previous.close());
+  previous.recordRequest({ campaignId: "summer", sourceHash: hash("old-source"), challengePassed: true });
+  const event = { campaignId: "summer", eventIdHash: hash("old-event") };
+  await previous.recordConversion(event);
+  const state = previous.exportState();
+  const current = createStore({ ...config, namespace: "new-risk" });
+  t.after(() => current.close());
+  assert.equal(current.restoreState(state), true, "safe namespace migration preserves the enclosing checkpoint");
+  const report = await current.getSnapshot();
+  assert.ok(report.campaigns.every(row => row.requests === 0 && row.conversions === 0 && row.distinctSourcesEstimate === 0));
+  assert.equal(current.exportState().namespace, "new-risk");
+  assert.equal(current.exportState().dedupe.length, 0, "old namespace HMAC identifiers are not imported");
+  assert.equal((await current.recordConversion(event)).duplicate, false);
+  assert.equal(current.restoreState(state), false, "the one-attempt guard still applies");
+});
+
+test("namespace migration still rejects malformed saved namespaces, counters, bitmaps and dedupe", async t => {
+  const config = { now: () => 300000, campaignIds: ["summer"] };
+  const original = createStore({ ...config, namespace: "old-risk" });
+  t.after(() => original.close());
+  original.recordRequest({ campaignId: "summer", sourceHash: hash("source") });
+  const originalState = original.exportState();
+  for (const mutate of [
+    state => { state.namespace = "invalid{tag}"; }, state => { state.namespace = ""; },
+    state => { state.campaigns[0].requests = -1; }, state => { state.campaigns[0].hosting = 2; },
+    state => { state.campaigns[0].bitmap = "broken"; },
+    state => { state.dedupe = [["summer", "raw-event", 300000]]; }
+  ]) {
+    const state = JSON.parse(JSON.stringify(originalState));
+    mutate(state);
+    const current = createStore({ ...config, namespace: "new-risk" });
+    t.after(() => current.close());
+    assert.equal(current.restoreState(state), false, "a namespace change cannot bypass validation");
+    assert.equal(campaign(await current.getSnapshot()).requests, 0);
+    assert.equal(current.exportState().dedupe.length, 0);
+  }
+});

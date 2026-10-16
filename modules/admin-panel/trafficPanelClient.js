@@ -111,8 +111,8 @@ function createTrafficPanelController(options = {}) {
       if (job.generation !== generation) return false;
       if (!report || report.ok === false || !report.total || typeof report.total.requests !== "number" || !Number.isFinite(report.total.requests)) throw new Error("The metrics response was invalid.");
       const at = now();
-      // Store only the two numbers used by the chart, never whole reports.
-      history.push({ at, current: report.total.requests, shared: report.shared && report.shared.total ? report.shared.total.requests : null });
+      // Store only the counters used by the chart, never whole reports.
+      history.push({ at, current: report.total.requests, shared: report.shared && report.shared.total ? report.shared.total.requests : null, persistent: report.persistent && report.persistent.total ? report.persistent.total.requests : null });
       if (history.length > 60) history.splice(0, history.length - 60);
       latest = report;
       lastSuccess = at;
@@ -161,7 +161,7 @@ function createTrafficPanelController(options = {}) {
   function visibilityChanged() { if (isHidden()) suspend(); else if (canPoll()) refresh(); }
   function onPageHide() { pageHidden = true; suspend(); }
   function onPageShow() { pageHidden = false; visibilityChanged(); }
-  function setScope(value) { scope = value === "shared" ? "shared" : "current"; paint(); updateView(); }
+  function setScope(value) { scope = value === "shared" || value === "persistent" ? value : "current"; paint(); updateView(); }
   function listen(target, name, handler) {
     if (target && target.addEventListener) { target.addEventListener(name, handler); listeners.push(() => target.removeEventListener(name, handler)); }
   }
@@ -208,14 +208,24 @@ function createTrafficPanelController(options = {}) {
       for (const key of ["dailyBudget", "used", "remaining"]) text(`risk.${key}`, providerEnabled ? numeric(provider[key]) : !available ? "Unavailable" : "Not enabled");
       for (const key of ["cacheHits", "cacheEntries", "active", "queued", "failed", "timeouts", "queueDropped"]) text(`risk.${key}`, providerEnabled ? numeric(cache[key]) : !available ? "Unavailable" : "Not enabled");
       text("risk.failure", !available ? "Unavailable" : !providerEnabled ? "Not enabled" : limitedText(provider.failureCode || cache.lastError, "None"));
+      const disabledProviderText = !available ? "Unavailable" : "Not enabled";
+      text("risk.lookupResult", !providerEnabled ? disabledProviderText : provider.lastResult === "unknown" ? "Unknown · no network classification" : provider.lastResult === "error" ? "Lookup failed" : provider.lastResult === "known" ? "Network indicators provided" : "No lookup completed");
+      text("risk.unknownReason", !providerEnabled ? disabledProviderText : limitedText(provider.unknownReason || cache.lastUnknownReason, "None"));
+      text("risk.unknownResponses", providerEnabled ? numeric(cache.unknownResponses) : disabledProviderText);
+      text("risk.lastHttpStatus", providerEnabled ? numeric(provider.lastHttpStatus) : disabledProviderText);
+      const fieldTypes = provider.indicatorTypes;
+      const knownTypes = ["absent", "null", "boolean", "string", "number", "object", "array", "undefined"];
+      text("risk.indicatorTypes", !providerEnabled ? disabledProviderText : fieldTypes && typeof fieldTypes === "object" ? [["is_datacenter", "Hosting"], ["is_proxy", "Proxy"], ["is_vpn", "VPN"]].map(([key, label]) => `${label}: ${knownTypes.includes(fieldTypes[key]) ? fieldTypes[key] : "unrecognized"}`).join(" · ") : "—");
 
       const campaignWindow = enabled && risk.campaignWindow || {};
       const campaignStorage = campaignWindow.storage || {};
       const localFallback = campaignWindow.scope === "unavailable" && campaignStorage.fallbackScope === "current_process";
-      const campaignAvailable = campaignWindow.scope === "current_process" || campaignWindow.scope === "redis" || localFallback;
-      const campaignScope = localFallback ? "Local fallback · shared Redis window unavailable" : campaignWindow.scope === "redis" ? "Shared Redis window" : "Current process window";
+      const campaignAvailable = campaignWindow.scope === "current_process" || campaignWindow.scope === "redis" || campaignWindow.scope === "disk" || localFallback;
+      const unavailableCampaignBackend = campaignStorage.backend === "disk" ? "disk checkpoint" : "shared Redis window";
+      const campaignScope = localFallback ? `Local fallback · ${unavailableCampaignBackend} unavailable` : campaignWindow.scope === "redis" ? "Shared Redis window" : campaignWindow.scope === "disk" ? "Persisted disk window" : "Current process window";
       find("campaign-window").textContent = campaignAvailable ? `${campaignScope} · ${numeric(campaignWindow.windowSeconds)} seconds · since ${date(campaignWindow.windowStartedAt)}. Client-supplied campaign attribution.` : !available ? "Campaign observations are unavailable in this report." : !enabled ? "Campaign observations are not enabled." : "Campaign window is unavailable; no campaign totals are shown.";
-      find("campaign-storage").textContent = !campaignAvailable ? "Campaign storage: unavailable." : `Campaign storage: ${campaignStorage.configured ? campaignStorage.ready ? "Redis connected" : "Redis unavailable" : "current process memory"} · pending ${numeric(campaignStorage.pendingOperations)} · dropped ${numeric(campaignStorage.droppedObservations)} · uncertain ${numeric(campaignStorage.uncertainObservations)} · last error: ${limitedText(campaignStorage.lastError, "None")}.`;
+      const campaignBackend = campaignStorage.backend === "disk" || campaignWindow.scope === "disk" ? campaignStorage.ready ? "Disk ready" : "Disk unavailable" : campaignStorage.configured ? campaignStorage.ready ? "Redis connected" : "Redis unavailable" : "current process memory";
+      find("campaign-storage").textContent = !campaignAvailable ? "Campaign storage: unavailable." : `Campaign storage: ${campaignBackend} · pending ${numeric(campaignStorage.pendingOperations)} · dropped ${numeric(campaignStorage.droppedObservations)} · uncertain ${numeric(campaignStorage.uncertainObservations)} · last error: ${limitedText(campaignStorage.lastError, "None")}.`;
       const rows = [];
       const campaigns = campaignAvailable && Array.isArray(campaignWindow.campaigns) ? campaignWindow.campaigns.slice(0, 33) : [];
       for (const campaign of campaigns) {
@@ -271,22 +281,24 @@ function createTrafficPanelController(options = {}) {
       },
       render(report, selected, samples) {
         const shared = selected === "shared";
-        const selectedReport = shared ? report.shared : report;
+        const persistent = selected === "persistent";
+        const current = !shared && !persistent;
+        const selectedReport = shared ? report.shared : persistent ? report.persistent : report;
         const total = selectedReport && selectedReport.total || {};
         const localRecent = report.total && report.total.latencyMs && report.total.latencyMs.recent || {};
         const latency = total.latencyMs || {};
-        find("scope-heading").textContent = shared ? "Shared Redis totals" : "Current process";
-        find("scope-note").textContent = shared ? selectedReport ? "Acknowledged totals across replicas in this Redis namespace." : "Shared totals are unavailable. See Redis persistence below." : "Counters reset when this process restarts; replicas have separate process counters.";
+        find("scope-heading").textContent = shared ? "Shared Redis totals" : persistent ? "Persisted disk totals" : "Current process";
+        find("scope-note").textContent = shared ? selectedReport ? "Acknowledged totals across replicas in this Redis namespace." : "Shared totals are unavailable. See Analytics persistence below." : persistent ? selectedReport ? "Totals resume from disk on this volume; they do not combine separate replica volumes. Unsaved changes may be lost after a crash." : "Persisted disk totals are unavailable. See Analytics persistence below." : "Counters reset when this process restarts; replicas have separate process counters.";
         text("startedAt", selectedReport && selectedReport.startedAt ? `Since ${date(selectedReport.startedAt)}` : "—");
         for (const key of ["requests", "completed", "aborted"]) text(key, numeric(total[key]));
-        text("inFlight", shared ? "—" : numeric(total.inFlight));
+        text("inFlight", current ? numeric(total.inFlight) : "—");
         for (const kind of ["get", "head", "prefetch", "operational", "other"]) text(`kind.${kind}`, numeric(selectedReport && selectedReport.byKind && selectedReport.byKind[kind] && selectedReport.byKind[kind].requests));
         for (const status of ["1xx", "2xx", "3xx", "4xx", "5xx", "other"]) text(`status.${status}`, numeric(total.byStatusClass && total.byStatusClass[status]));
         for (const name of ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"]) text(`challenge.${name}`, numeric(selectedReport && selectedReport.challenges && selectedReport.challenges[name]));
         text("latency.mean", milliseconds(latency.mean));
         text("latency.max", milliseconds(latency.max));
-        for (const percentile of ["p50", "p95", "p99"]) text(`latency.${percentile}`, milliseconds(localRecent[percentile]));
-        text("latency.samples", typeof localRecent.sampleCount === "number" ? `${numeric(localRecent.sampleCount)} / ${numeric(localRecent.sampleLimit)}` : "—");
+        for (const percentile of ["p50", "p95", "p99"]) text(`latency.${percentile}`, current ? milliseconds(localRecent[percentile]) : "—");
+        text("latency.samples", current && typeof localRecent.sampleCount === "number" ? `${numeric(localRecent.sampleCount)} / ${numeric(localRecent.sampleLimit)}` : "—");
         const runtime = report.runtime || {};
         const memory = runtime.memory || {};
         for (const key of ["rss", "heapUsed"]) text(`memory.${key}`, numeric(memory[`${key}Mb`], 1));
@@ -301,7 +313,13 @@ function createTrafficPanelController(options = {}) {
           : logFileError || "None";
         text("resources.logFileLastError", logFileErrorText);
         const storage = report.storage || {};
-        text("storage.state", !storage.configured ? "Not configured · memory only" : storage.ready ? "Connected" : "Unavailable · pending locally");
+        const diskStorage = report.diskStorage || {};
+        text("storage.backends", [diskStorage.configured ? "Disk" : null, storage.configured ? "Redis" : null].filter(Boolean).join(" + ") || "Memory only");
+        text("disk.state", !diskStorage.configured ? "Not configured" : diskStorage.ready ? "Ready" : "Unavailable");
+        text("disk.lastSaveAt", date(diskStorage.lastSaveAt));
+        text("disk.pending", typeof diskStorage.pending === "boolean" ? diskStorage.pending ? "Yes" : "No" : numeric(diskStorage.pending));
+        text("disk.lastError", diskStorage.lastError == null || diskStorage.lastError === "" ? "None" : String(diskStorage.lastError).slice(0, 256));
+        text("storage.state", !storage.configured ? "Not configured" : storage.ready ? "Connected" : "Unavailable · pending locally");
         for (const key of ["pendingObservations", "uncertainObservations", "droppedObservations"]) text(`storage.${key}`, numeric(storage[key]));
         text("storage.lastError", storage.lastError || "None");
         text("storage.lastFlushAt", date(storage.lastFlushAt));

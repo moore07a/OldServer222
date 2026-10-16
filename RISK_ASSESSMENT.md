@@ -41,6 +41,17 @@ and queues background work; later requests can use the cached result. Earlier
 observations are not reclassified. Failures, timeouts, absent fields, and
 exhausted budgets remain unknown rather than being treated as safe traffic.
 
+A successful JSON response that supplies no documented boolean indicators is
+now shown as **Unknown — no network classification**, rather than the generic
+cache `invalid_response` failure. Missing/null fields stay unknown; the app does
+not guess alternate wrappers or coerce strings such as `"false"`. Wrong field
+types, malformed JSON, API error objects, HTTP failures, and quota limits remain
+distinct failures. Safe diagnostics expose only HTTP status and fixed field
+types for `is_datacenter`, `is_proxy`, and `is_vpn`, never their raw response,
+visitor IP, or request URL. Unknown responses use the short negative-cache TTL.
+Panel polling is operational traffic and does not retry a visitor lookup;
+another eligible visitor request can retry after that TTL expires.
+
 The default budget is 900 attempted lookups per rolling 24 hours **per running
 process**, including failures. It resets on restart and is not shared through
 Redis. The provider's anonymous quota is shared by outbound IP address, so
@@ -86,6 +97,20 @@ shared Redis data, local-only data, or local fallback when Redis is unavailable.
 Window keys expire at window start plus twice the window duration. They do
 not provide historical campaign reporting.
 
+With [volume storage configured](TRAFFIC_METRICS.md#railway-volume-storage),
+the campaign window uses **Persisted disk window** and restores its current
+counts/bitmaps after a restart. An expired or changed-length window starts fresh.
+Adding/removing campaigns keeps matching current-window rows and preserves
+bounded valid conversion dedupe, including previously configured IDs. Top-level
+risk counters still describe the current process; aggregate saved risk totals
+are available separately in `persistent.risk`.
+
+Changing a valid `RISK_NAMESPACE` deliberately starts fresh campaign counters
+and conversion dedupe for that namespace. HTTP, challenge, and aggregate risk
+totals still restore from the unchanged analytics namespace. The saved campaign
+state must pass full validation before this reset; changing namespaces does not
+allow malformed checkpoint data to be overwritten.
+
 ## Trusted backend conversions
 
 Conversions stay disabled until campaigns and a dedicated
@@ -115,7 +140,14 @@ not increment another window. Responses use `401` for invalid authorization,
 `400` for invalid events, `404` when disabled, `429` for dedupe capacity, and
 `503` for unavailable configured storage. The last two include `Retry-After: 5`.
 
-Local dedupe retains at most 4,096 IDs across campaigns and resets on restart.
+Memory-only dedupe retains at most 4,096 IDs across campaigns and resets on restart.
+When disk storage is selected, those bounded HMAC identifiers are checkpointed
+with the campaign state. New events and accepted retries wait for a durable
+checkpoint before returning `200`; a failed or uncertain commit returns `503`
+and retains the in-memory marker so a later retry cannot count it twice. Disk
+conversion commits have a fixed queue of 32 and finite deadlines; saturation
+returns `429`. Startup restore completes before accepting HTTP requests.
+
 Shared dedupe requires Redis and consistent namespace/hash secrets across
 replicas. It admits at most 2,048 distinct IDs per campaign per UTC day;
 current/previous-day buckets support the rolling 24-hour check and expire 48
@@ -171,7 +203,8 @@ separate.
 | `RISK_WINDOW_SECONDS` | `300`; integer 10–3,600. |
 | `RISK_BURST_MIN_REQUESTS` | `200`; integer 10–100,000. |
 | `RISK_BURST_MIN_SOURCES` | `20`; integer 2–10,000. |
-| `RISK_REDIS_URL` | Falls back to the metrics Redis URL, then `REDIS_URL` / `REDIS_PRIVATE_URL`; absent means local only. TLS verification remains enabled. |
+| `ANALYTICS_STORAGE_DIR` | Optional persistent analytics directory; Railway volumes can auto-select their `analytics` subdirectory. See the volume guide. |
+| `RISK_REDIS_URL` | Explicit URL selects Redis. Otherwise configured disk storage takes precedence; without disk it falls back to the metrics Redis URL, then `REDIS_URL` / `REDIS_PRIVATE_URL`. TLS verification remains enabled. |
 | `RISK_NAMESPACE` | Falls back to `TRAFFIC_METRICS_NAMESPACE`, then `oldserver222`; 1–80 letters/numbers/colons/underscores/hyphens. |
 | `RISK_HASH_SECRET` | Falls back to `ADMIN_TOKEN`; keep consistent across replicas/restarts. Rotation changes identifiers and dedupe. |
 | `RISK_CONVERSION_TOKEN` | Empty/disabled; separate 32–256-character printable ASCII backend secret, without spaces. |
@@ -189,6 +222,8 @@ invalid values do not appear in configuration errors.
 npm test
 TRAFFIC_METRICS_TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
 node tests/traffic-panel-browser.js --output /tmp/risk-browser.json
+node tests/traffic-panel-soak.js --disk --duration-sec 300 --rps 30 --panels 3 \
+  --disk-outage-sec 20 --output /tmp/disk-soak.json
 TRAFFIC_METRICS_TEST_REDIS_URL=redis://127.0.0.1:6379 \
   node tests/traffic-panel-soak.js --duration-sec 300 --rps 30 --panels 3 \
   --redis-outage-sec 20 --output /tmp/risk-soak.json

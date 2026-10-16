@@ -253,7 +253,7 @@ test("logout and reconnect discard old work and fixed-size chart history never e
   }
   assert.equal(panel.controller.getState().sampleCount, 60);
   assert.equal(panel.rendered.at(-1).history.length, 60);
-  assert.deepEqual(Object.keys(panel.rendered.at(-1).history[0]).sort(), ["at", "current", "shared"]);
+  assert.deepEqual(Object.keys(panel.rendered.at(-1).history[0]).sort(), ["at", "current", "persistent", "shared"]);
   panel.controller.setScope("shared");
   assert.equal(panel.rendered.at(-1).scope, "shared");
   assert.equal(panel.rendered.at(-1).history.at(-1).shared, 138);
@@ -406,6 +406,130 @@ test("saturated source cohorts display capacity instead of a misleading count", 
   panel.controller.refresh();
   await panel.complete(1, { ...report(2), risk });
   assert.equal(roles.get("campaign-rows").children[0].children[2].textContent, "0");
+});
+
+test("disk scope uses persisted totals without presenting process gauges or recent percentiles as persisted", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const payload = {
+    ...report(3),
+    total: { requests: 3, inFlight: 1, latencyMs: { recent: { p50: 2, p95: 4, p99: 5, sampleCount: 3, sampleLimit: 512 } } },
+    persistent: { scope: "disk", startedAt: "2026-10-15T10:00:00Z", total: { requests: 400, completed: 380, aborted: 20, inFlight: 99, latencyMs: { mean: 8, max: 20, recent: { p50: 999 } } }, byKind: { get: { requests: 100 } }, challenges: { passed: 25 } },
+    diskStorage: { configured: true, ready: true, lastSaveAt: "2026-10-16T10:00:00Z", pending: false, lastError: null },
+    runtime: { memory: { rssMb: 42 }, inFlightRequests: 1 }
+  };
+  panel.controller.connect("token");
+  await panel.complete(0, payload);
+  assert.equal(fields.get("latency.p50").textContent, "2 ms");
+  panel.controller.setScope("persistent");
+  assert.equal(panel.controller.getState().scope, "persistent");
+  assert.equal(roles.get("scope-heading").textContent, "Persisted disk totals");
+  assert.match(roles.get("scope-note").textContent, /do not combine separate replica volumes/);
+  assert.equal(fields.get("requests").textContent, "400");
+  assert.equal(fields.get("completed").textContent, "380");
+  assert.equal(fields.get("kind.get").textContent, "100");
+  assert.equal(fields.get("challenge.passed").textContent, "25");
+  assert.equal(fields.get("latency.mean").textContent, "8 ms");
+  assert.equal(fields.get("inFlight").textContent, "—");
+  assert.equal(fields.get("latency.p50").textContent, "—");
+  assert.equal(fields.get("latency.samples").textContent, "—");
+  assert.equal(fields.get("memory.rss").textContent, "42", "separate current-process resources still show the responding process");
+  assert.match(roles.get("chart-note").textContent, /max 400/);
+  assert.equal(fields.get("storage.backends").textContent, "Disk");
+  assert.equal(fields.get("disk.state").textContent, "Ready");
+  assert.equal(fields.get("storage.state").textContent, "Not configured", "disabled Redis does not mislabel active disk persistence as memory only");
+  assert.equal(fields.get("disk.pending").textContent, "No");
+  assert.equal(fields.get("disk.lastError").textContent, "None");
+  panel.controller.setScope("current");
+  assert.equal(fields.get("requests").textContent, "3");
+  assert.equal(fields.get("latency.p50").textContent, "2 ms");
+  assert.equal(panel.calls.length, 1, "scope changes reuse the existing report and polling loop");
+});
+
+test("missing and failed disk status remain explicit; disk errors are bounded text and logout clears them", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  panel.controller.connect("token");
+  await panel.complete(0, report(1));
+  panel.controller.setScope("persistent");
+  assert.equal(fields.get("requests").textContent, "—");
+  assert.match(roles.get("scope-note").textContent, /unavailable/);
+  assert.equal(fields.get("storage.backends").textContent, "Memory only");
+  assert.equal(fields.get("disk.state").textContent, "Not configured");
+  const malicious = '<img src=x onerror="alert(1)">';
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), diskStorage: { configured: true, ready: false, pending: true, lastError: malicious + "x".repeat(400) }, storage: { configured: true, ready: true } });
+  assert.equal(panel.controller.getState().error, false);
+  assert.equal(fields.get("storage.backends").textContent, "Disk + Redis");
+  assert.equal(fields.get("disk.state").textContent, "Unavailable");
+  assert.equal(fields.get("disk.pending").textContent, "Yes");
+  assert.equal(fields.get("disk.lastError").textContent.length, 256);
+  assert.equal(fields.get("disk.lastError").textContent.startsWith(malicious), true);
+  assert.equal(fields.get("storage.state").textContent, "Connected");
+  panel.controller.disconnect();
+  assert.equal(fields.get("disk.lastError").textContent, "—");
+  assert.equal(fields.get("disk.state").textContent, "—");
+  assert.equal(panel.timers.size, 0);
+});
+
+test("campaign disk windows are labeled separately from Redis and keep bounded text-only rows", async t => {
+  const { root, roles } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const risk = riskReport(Array.from({ length: 50 }, (_, index) => ({ id: `persisted-${index}`, requests: index })));
+  risk.campaignWindow.scope = "disk";
+  risk.campaignWindow.storage = { backend: "disk", configured: true, ready: true, pendingOperations: 1, droppedObservations: 0, uncertainObservations: 0, lastError: null };
+  panel.controller.connect("token");
+  await panel.complete(0, { ...report(1), risk });
+  assert.equal(panel.controller.getState().error, false);
+  assert.match(roles.get("campaign-window").textContent, /Persisted disk window/);
+  assert.match(roles.get("campaign-storage").textContent, /Disk ready · pending 1/);
+  assert.equal(roles.get("campaign-storage").textContent.includes("Redis"), false);
+  assert.equal(roles.get("campaign-rows").children.length, 33);
+  risk.campaignWindow.scope = "unavailable";
+  Object.assign(risk.campaignWindow.storage, { ready: false, fallbackScope: "current_process" });
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), risk });
+  assert.match(roles.get("campaign-window").textContent, /Local fallback · disk checkpoint unavailable/);
+  assert.equal(roles.get("campaign-window").textContent.includes("Redis"), false);
+  assert.match(roles.get("campaign-storage").textContent, /Disk unavailable/);
+  panel.controller.disconnect();
+  assert.equal(roles.get("campaign-rows").children.length, 0);
+});
+
+test("successful unclassified provider responses stay distinct from failed lookups and expose safe types only", async t => {
+  const { root, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const risk = riskReport();
+  Object.assign(risk.intelligence.providerStatus, { lastResult: "unknown", unknownReason: "indicators_unavailable", lastHttpStatus: 200, indicatorTypes: { is_datacenter: "null", is_proxy: "absent", is_vpn: "null", ip: "NEVER_RENDER_RAW_IP" } });
+  Object.assign(risk.intelligence.cache, { unknownResponses: 7, failed: 0, lastUnknownReason: "indicators_unavailable", lastError: null });
+  panel.controller.connect("token");
+  await panel.complete(0, { ...report(1), risk });
+  assert.equal(fields.get("risk.lookupResult").textContent, "Unknown · no network classification");
+  assert.equal(fields.get("risk.unknownReason").textContent, "indicators_unavailable");
+  assert.equal(fields.get("risk.unknownResponses").textContent, "7");
+  assert.equal(fields.get("risk.failed").textContent, "0");
+  assert.equal(fields.get("risk.failure").textContent, "None");
+  assert.equal(fields.get("risk.lastHttpStatus").textContent, "200");
+  assert.equal(fields.get("risk.indicatorTypes").textContent, "Hosting: null · Proxy: absent · VPN: null");
+  assert.equal(fields.get("risk.indicatorTypes").textContent.includes("NEVER_RENDER"), false);
+  Object.assign(risk.intelligence.providerStatus, { lastResult: "error", unknownReason: null, failureCode: "risk_provider_invalid_indicator_types", lastHttpStatus: 200, indicatorTypes: { is_datacenter: '<img src=x onerror="alert(1)">', is_proxy: "string", is_vpn: "boolean" } });
+  Object.assign(risk.intelligence.cache, { lastUnknownReason: null, failed: 1 });
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), risk });
+  assert.equal(fields.get("risk.lookupResult").textContent, "Lookup failed");
+  assert.equal(fields.get("risk.unknownReason").textContent, "None");
+  assert.equal(fields.get("risk.failed").textContent, "1");
+  assert.equal(fields.get("risk.failure").textContent, "risk_provider_invalid_indicator_types");
+  assert.equal(fields.get("risk.indicatorTypes").textContent, "Hosting: unrecognized · Proxy: string · VPN: boolean");
+  risk.intelligence.enabled = false;
+  panel.controller.refresh();
+  await panel.complete(2, { ...report(3), risk });
+  assert.equal(fields.get("risk.lookupResult").textContent, "Not enabled");
+  assert.equal(fields.get("risk.unknownResponses").textContent, "Not enabled");
 });
 
 test("rendered shell escapes route and nonce attributes and contains no preloaded traffic data or inline handlers", () => {

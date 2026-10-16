@@ -21,7 +21,7 @@ back off up to 60 seconds and mark the last report stale. Authentication
 rejection stops polling and clears the session. The chart retains at most 60
 numeric samples; the DOM does not grow with incoming traffic.
 
-Choose **Current process** or **Shared Redis totals** for the counters. Recent
+Choose **Current process**, **Persisted disk totals**, or **Shared Redis totals** for the counters. Recent
 latency percentiles and runtime resources always describe the responding
 process and are labelled accordingly. Redis errors and pending observations
 remain visible so a connected socket is not mistaken for durable delivery.
@@ -134,6 +134,77 @@ browser telemetry is not used to establish these outcomes.
 
 ## Persistence and deployment
 
+### Railway volume storage
+
+For one Railway app instance with a persistent volume mounted at `/data`, set:
+
+```dotenv
+ANALYTICS_STORAGE_DIR=/data/analytics
+```
+
+The app also selects `<RAILWAY_VOLUME_MOUNT_PATH>/analytics` automatically when
+that Railway variable exists and `ANALYTICS_STORAGE_DIR` is unset. An explicitly
+empty value or `off` disables disk storage. Keep your existing `LOG_DIR`,
+`LOG_FILE`, `RUNTIME_DIAG_DIR`, and `RUNTIME_INCIDENT_FILE` settings: request logs
+and diagnostics are separate from analytics checkpoints. Visitor file logging
+still requires `LOG_TO_FILE=1`.
+
+Disk storage needs Linux and `/usr/bin/flock` from util-linux. It creates a
+private directory (mode `0700`) with private checkpoint/lock files (`0600`). An
+existing directory with broader permissions is rejected; restrict permissions
+on the analytics directory only rather than changing your logs. A missing
+locking utility or inaccessible directory appears as a safe storage error;
+the app continues serving HTTP. This backend is for one writer on one attached
+volume, not shared totals across replicas.
+
+The authenticated metrics API includes `persistent` (`scope: "disk"`) and
+`diskStorage`. The panel labels **Persisted disk totals** and shows readiness,
+the last successful save, pending work, and storage errors. These totals include
+settled requests, status groups, lifetime mean/max latency, and challenge counts.
+In-flight requests, recent percentiles, resources, and top-level risk counters
+continue to describe the current process. The disk API also retains aggregate
+risk totals under `persistent.risk`; campaign windows and conversion dedupe use
+the disk backend unless an explicit `RISK_REDIS_URL` selects Redis.
+
+Every five seconds, dirty aggregates are captured outside visitor callbacks
+and sent to one disk worker. The worker writes a temporary file, syncs it,
+atomically replaces the checkpoint, and syncs the directory. The API's
+`persistent` summary reflects acknowledged checkpoints, so it can lag current
+traffic. An initial empty checkpoint is acknowledged before HTTP startup.
+Graceful shutdown attempts a final checkpoint within finite deadlines. A crash
+can lose recent uncheckpointed observations; accepted disk conversions wait for
+durable acknowledgement before returning success.
+
+Each namespace retains one checkpoint of at most 1 MiB, its permanent advisory
+lock file, and at most one active temporary file. Abandoned temporary files are
+cleaned with bounded work at startup. No request URLs, raw IPs, user agents,
+tokens, or raw conversion IDs are stored in analytics. Campaign source bitmaps
+and bounded HMAC conversion identifiers support restart recovery. No IP cache
+or raw provider response is written to disk.
+
+The namespace follows `TRAFFIC_METRICS_NAMESPACE` (default `oldserver222`). Keep
+it stable across restarts. Changing namespaces creates a separate checkpoint;
+older namespaces need deliberate cleanup. An OS advisory lock prevents a
+second writer and releases automatically when its worker exits, including after
+a crash. Never delete the lock file while a service could be running. A process
+that starts while another owner is active reports `locked`; restart it after
+the previous owner exits. Checkpoint corruption, unsafe files, and oversized
+files are preserved for investigation rather than silently overwritten.
+
+Disk errors remain visible and never block ordinary visitor responses. Failed
+writes retain bounded pending state and retry in the background; if the worker
+itself times out or exits, restart the app after resolving the underlying issue.
+An initialized worker that still holds its lock can accept an immediate retry
+even while storage readiness reports the previous write failure. Conversion
+readiness remains false until a checkpoint succeeds. Locked, corrupt,
+uninitialized, closed, or terminated stores cannot use this retry path.
+Configured disk conversion writes return `503` when durable storage is not
+available. A volume backup is still needed if you need recovery after volume
+deletion or storage loss. Five GB comfortably holds these bounded aggregates;
+your logs and diagnostics have their own retention needs.
+
+### Optional Redis storage
+
 The top-level totals, challenge counts, in-flight counts, and recent latency
 samples describe the current process and reset on restart. The separate
 `shared` object has `scope: "redis"` and combines acknowledged HTTP and
@@ -149,8 +220,9 @@ Configure a Redis connection in the application's secure environment settings:
   Use the same value across replicas and restarts, and different values for
   production and test deployments.
 
-No Redis URL means local-only operation: `shared` is `null` and
-`storage.configured` is false. An unavailable or unreadable Redis also returns
+No Redis URL means `shared` is `null` and `storage.configured` is false. Disk
+storage can still be configured independently; without either backend, all
+analytics are local-only. An unavailable or unreadable Redis also returns
 `shared: null`; local metrics and normal request handling continue.
 
 Shared HTTP counts record settled responses: `requests = completed + aborted`.

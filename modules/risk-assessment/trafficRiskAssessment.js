@@ -13,6 +13,7 @@ function createTrafficRiskAssessment({
   env = {}, hashSecret = "", getRequestIdentity = () => ({}),
   headlessSuspicion = () => ({}), createRedisClient = () => null,
   provider: suppliedProvider, cache: suppliedCache, store: suppliedStore,
+  persistence = null, onRiskObservation = () => {},
   fetch: fetchImpl = globalThis.fetch, now = Date.now
 } = {}) {
   const enabled = !["0", "false", "off", "no"].includes(String(env.RISK_REPORTING_ENABLED || "1").trim().toLowerCase());
@@ -41,7 +42,7 @@ function createTrafficRiskAssessment({
   let closed = false;
   let redisClient = null;
   let redisSetupFailed = false;
-  if (enabled && namespaceValid && !suppliedStore) {
+  if (enabled && namespaceValid && !suppliedStore && !persistence) {
     try { redisClient = createRedisClient(); }
     catch (_) { redisSetupFailed = true; configErrors.push("risk_storage_unavailable"); }
   }
@@ -55,6 +56,7 @@ function createTrafficRiskAssessment({
     negativeTtlMs: number("RISK_IP_NEGATIVE_TTL_MS", 60000, 1000, 3600000), now });
   // Failed configured storage must not silently authorize local conversions.
   const store = suppliedStore || createCampaignRiskStore({ client: redisSetupFailed ? { status: "end" } : redisClient, namespace, campaignIds,
+    ...(persistence && namespaceValid ? { onDirty: persistence.onDirty, commit: persistence.commit, persistenceReady: persistence.isReady } : {}),
     windowSec: number("RISK_WINDOW_SECONDS", 300, 10, 3600), now });
   const minRequests = number("RISK_BURST_MIN_REQUESTS", 200, 10, 100000);
   const minSources = number("RISK_BURST_MIN_SOURCES", 20, 2, 10000);
@@ -101,6 +103,9 @@ function createTrafficRiskAssessment({
         headless: headless || anomalous, hosting: network.hosting === true, proxy: network.proxy === true,
         vpn: network.vpn === true, residentialProxy: network.residentialProxy === true,
         challengePassed: evidence?.passed === true, challengeFailed: evidence?.failed === true });
+      onRiskObservation({ headlessMarkers: headless, headerAnomalies: anomalous, networkKnown: known, networkUnknown: !known,
+        hostingIndicators: network.hosting === true, proxyIndicators: network.proxy === true, vpnIndicators: network.vpn === true,
+        residentialProxyIndicators: network.residentialProxy === true, challengePassed: evidence?.passed === true, challengeFailed: evidence?.failed === true });
     } catch (_) { observerErrors = Math.min(Number.MAX_SAFE_INTEGER, observerErrors + 1); }
   }
   async function recordConversion(body) {
@@ -136,7 +141,8 @@ function createTrafficRiskAssessment({
     cache.close();
     try { await store.close(); } finally { redisClient?.disconnect?.(); }
   }
-  return { observe, recordChallengeOutcome, recordConversion, conversionAuthorized, getSnapshot, close, enabled, conversionEnabled };
+  return { observe, recordChallengeOutcome, recordConversion, conversionAuthorized, getSnapshot, close, enabled, conversionEnabled,
+    exportPersistentState: () => store.exportState(), restorePersistentState: state => store.restoreState(state) };
 }
 
 module.exports = createTrafficRiskAssessment;

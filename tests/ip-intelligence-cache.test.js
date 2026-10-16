@@ -163,6 +163,48 @@ test("provider errors use negative TTL, recover, and expose only fixed safe stat
   assert.equal(h.cache.getStatus().lookups, 2);
 });
 
+test("explicit unavailable indicators use negative TTL without becoming errors or known safe flags", async t => {
+  const h = harness({ negativeTtlMs: 20 });
+  t.after(() => h.cache.close());
+  h.cache.observe("8.8.8.8"); await flush();
+  await h.resolve(0, { state: "unknown", reason: "indicators_unavailable", hosting: null, proxy: null,
+    vpn: null, residentialProxy: null, source: "ipapi.is", message: "private ignored response" });
+  assert.deepEqual(h.cache.observe("8.8.8.8"), { state: "unknown", hosting: null, proxy: null,
+    vpn: null, residentialProxy: null, source: "ipapi.is" });
+  assert.equal(h.cache.getStatus().unknownResponses, 1);
+  assert.equal(h.cache.getStatus().failed, 0);
+  assert.equal(h.cache.getStatus().lastError, null);
+  assert.equal(h.cache.getStatus().lastUnknownReason, "indicators_unavailable");
+  assert.doesNotMatch(JSON.stringify(h.cache.getStatus()), /private|message|8\.8\.8\.8/);
+  await h.advance(19);
+  assert.equal(h.cache.observe("8.8.8.8").state, "unknown");
+  assert.equal(h.calls.length, 1);
+  await h.advance(1);
+  assert.equal(h.cache.observe("8.8.8.8").state, "pending");
+  await flush();
+  await h.resolve(1, { hosting: false, vpn: false, proxy: false, source: "ipapi.is" });
+  assert.equal(h.cache.observe("8.8.8.8").hosting, false);
+  assert.equal(h.cache.observe("8.8.8.8").state, "known");
+  assert.equal(h.cache.getStatus().lastUnknownReason, null);
+  assert.equal(h.cache.getStatus().failed, 0);
+  assert.equal(h.cache.getStatus().unknownResponses, 1);
+});
+
+test("unavailable indicator metadata cannot mask malformed data or expose arbitrary reasons", async () => {
+  for (const value of [{ state: "unknown", reason: "private-message" },
+    { state: "unknown", reason: "indicators_unavailable", hosting: "false" },
+    { state: "unknown", reason: "indicators_unavailable", hosting: false }]) {
+    const h = harness({ lookup: async () => value });
+    h.cache.observe("8.8.8.8"); await flush();
+    assert.equal(h.cache.getStatus().unknownResponses, 0);
+    assert.equal(h.cache.getStatus().failed, 1);
+    assert.equal(h.cache.getStatus().lastUnknownReason, null);
+    assert.equal(h.cache.getStatus().lastError, "invalid_response");
+    assert.doesNotMatch(JSON.stringify(h.cache.getStatus()), /private-message/);
+    h.cache.close();
+  }
+});
+
 test("empty or malformed provider data remains unknown, and source URLs are not returned", async t => {
   for (const value of [null, undefined, {}, { hosting: "true" }, { vpn: 1 }]) {
     const h = harness({ lookup: async () => value });
