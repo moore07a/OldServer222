@@ -13,6 +13,7 @@ function createTurnstileSecurity(dependencies) {
     makeIpLimiter,
     normHost,
     normalizeTurnstileEnv,
+    recordChallengeEvent = () => {},
     safeLogValue
   } = dependencies;
 
@@ -98,7 +99,29 @@ if (!TURNSTILE_SITEKEY || !TURNSTILE_SECRET) {
 }
 
 async function verifyTurnstileToken(token, remoteip, expected) {
-  if (!TURNSTILE_SECRET || !token) return { ok:false, reason:"missing" };
+  function finishVerification(result) {
+    if (token) {
+      let event = "failed";
+      if (result.ok) event = "passed";
+      else if (result.reason === "token_too_old") event = "expired";
+      else if (["missing", "upstream_status", "invalid_json", "verify_error", "bad_hostname_config"].includes(result.reason)) {
+        event = "providerError";
+      } else if (result.reason === "not_success") {
+        const codes = result.data && Array.isArray(result.data["error-codes"])
+          ? result.data["error-codes"] : [];
+        if (codes.some(code => ["internal-error", "missing-input-secret", "invalid-input-secret"].includes(code))) {
+          event = "providerError";
+        } else if (codes.includes("timeout-or-duplicate")) {
+          event = "expiredOrDuplicate";
+        }
+      }
+      // Observability must never change token validation or its return value.
+      try { recordChallengeEvent(event); } catch {}
+    }
+    return result;
+  }
+
+  if (!TURNSTILE_SECRET || !token) return finishVerification({ ok:false, reason:"missing" });
   try {
     const resp = await fetchWithRuntimeSpan("turnstile_verify", TURNSTILE_ORIGIN + "/turnstile/v0/siteverify", {
       method:"POST",
@@ -107,7 +130,7 @@ async function verifyTurnstileToken(token, remoteip, expected) {
     }, process.env.TURNSTILE_VERIFY_TIMEOUT_MS || 8000);
     if (!resp.ok) {
       addLog(`[TS] verify upstream status=${resp.status}`);
-      return { ok:false, reason:"upstream_status", status: resp.status };
+      return finishVerification({ ok:false, reason:"upstream_status", status: resp.status });
     }
 
     let data;
@@ -115,16 +138,16 @@ async function verifyTurnstileToken(token, remoteip, expected) {
       data = await resp.json();
     } catch (jsonErr) {
       addLog(`[TS] verify invalid_json err=${safeLogValue(jsonErr && jsonErr.message || jsonErr, 80)}`);
-      return { ok:false, reason:"invalid_json" };
+      return finishVerification({ ok:false, reason:"invalid_json" });
     }
 
     if (!data || !data.success) {
       addLog("[TS] verify failed codes=" + JSON.stringify((data && data["error-codes"]) || []));
-      return { ok:false, reason:"not_success", data };
+      return finishVerification({ ok:false, reason:"not_success", data });
     }
 
     if (ENFORCE_ACTION && expected?.action && data.action !== expected.action)
-      return { ok:false, reason:"bad_action", data };
+      return finishVerification({ ok:false, reason:"bad_action", data });
 
     if (expected?.linkHash) {
       const raw = String(data.cdata||"");
@@ -134,19 +157,19 @@ async function verifyTurnstileToken(token, remoteip, expected) {
       const age = Math.abs(Math.floor(Date.now()/1000) - tsSec);
       if (h !== expected.linkHash) {
         addLog(`[TS] cdata mismatch got=${h||'-'} want=${expected.linkHash} age=${age}s`);
-        return { ok:false, reason:"bad_cdata_hash", data };
+        return finishVerification({ ok:false, reason:"bad_cdata_hash", data });
       }
-      if (age > (expected.maxAgeSec||MAX_TOKEN_AGE_SEC)) return { ok:false, reason:"token_too_old", data, age };
+      if (age > (expected.maxAgeSec||MAX_TOKEN_AGE_SEC)) return finishVerification({ ok:false, reason:"token_too_old", data, age });
     }
 
     if (EXPECT_HOSTNAME_ENTRIES.length && !EXPECT_HOSTNAME_PATTERNS.length) {
       addLog(`[TS-HOST-CONFIG-ERROR] TURNSTILE_EXPECT_HOSTNAME has no valid patterns raw=[${EXPECT_HOSTNAME_ENTRIES.join(",")}]`);
-      return { ok:false, reason:"bad_hostname_config" };
+      return finishVerification({ ok:false, reason:"bad_hostname_config" });
     }
 
     if (EXPECT_HOSTNAME_PATTERNS.length && !data.hostname) {
       addLog("[TS-HOST-MISMATCH] missing hostname");
-      return { ok:false, reason:"missing_hostname", data };
+      return finishVerification({ ok:false, reason:"missing_hostname", data });
     }
 
     if (EXPECT_HOSTNAME_PATTERNS.length && data.hostname) {
@@ -160,17 +183,17 @@ async function verifyTurnstileToken(token, remoteip, expected) {
         addLog(`[TS-HOST-MISMATCH] got=${got} expected=[${expected}]`);
         addSpacer();
         data.hostname = got;
-        return { ok:false, reason:"bad_hostname", data };
+        return finishVerification({ ok:false, reason:"bad_hostname", data });
       }
 
       data.hostname = got;
     }
 
     addLog(`[TS] ok action=${data.action||'-'} hostname=${data.hostname||'-'} cdata=${String(data.cdata||'').slice(0,12)}…`);
-    return { ok:true, data };
+    return finishVerification({ ok:true, data });
   } catch (e) {
     addLog("Turnstile verify error: " + e.message);
-    return { ok:false, reason:"verify_error" };
+    return finishVerification({ ok:false, reason:"verify_error" });
   }
 }
 

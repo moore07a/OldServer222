@@ -203,3 +203,40 @@ test("arbitrary paths and headers do not create stored keys, and snapshots are i
   assert.equal(fresh.byKind.other.completed, 600);
   assert.equal(fresh.byKind.get.completed, 0);
 });
+
+test("challenge observations use fixed labels and independent snapshots", () => {
+  const events = [];
+  const metrics = createHarness({ onChallengeEvent: event => events.push(event) });
+  const expected = ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"];
+  for (const event of expected) assert.equal(metrics.recordChallengeEvent(event), true);
+  for (const event of ["__proto__", "constructor", "https://private.example/", "arbitrary-user-id"]) {
+    assert.equal(metrics.recordChallengeEvent(event), false);
+  }
+  const snapshot = metrics.getSnapshot();
+  assert.deepEqual(Object.keys(snapshot.challenges), expected);
+  assert.deepEqual(Object.values(snapshot.challenges), expected.map(() => 1));
+  assert.deepEqual(events, expected);
+  snapshot.challenges.passed = -100;
+  assert.equal(metrics.getSnapshot().challenges.passed, 1);
+  assert.equal(metrics.getSnapshot().total.requests, 0);
+});
+
+test("persistence observers receive each settled request once without affecting responses", () => {
+  const observations = [];
+  const metrics = createHarness({ onRequest: observation => observations.push(observation) });
+  const completed = metrics.start({ status: 403 });
+  completed.finish(9);
+  completed.res.emit("close");
+  const aborted = metrics.start({ method: "HEAD" });
+  aborted.req.emit("aborted");
+  aborted.finish(10);
+  assert.deepEqual(observations, [
+    { kind: "get", completed: true, statusClass: "4xx", durationMs: 9 },
+    { kind: "head", completed: false, statusClass: "2xx", durationMs: 0 }
+  ]);
+  const broken = createHarness({ onRequest() { throw new Error("storage unavailable"); }, onChallengeEvent() { throw new Error("storage unavailable"); } });
+  assert.doesNotThrow(() => broken.start().finish(4));
+  assert.doesNotThrow(() => broken.recordChallengeEvent("shown"));
+  assert.equal(broken.getSnapshot().total.completed, 1);
+  assert.equal(broken.getSnapshot().challenges.shown, 1);
+});

@@ -69,6 +69,7 @@ function createOperationalRoutes(dependencies) {
     readLogFileTail,
     readRuntimeIncidents,
     recordChallengeBypassAttempt,
+    recordChallengeEvent = () => {},
     renderScannerSafePage,
     require,
     requireAdmin,
@@ -683,6 +684,22 @@ function handleChallengeFragment(req, res) {
   const encryptedData = encryptChallengeData(challengePayload);
   const htmlContent = buildChallengeHtml(encryptedData, nonce);
 
+  // Count server-served widget HTML, including the wrapper's POST request.
+  // This does not establish that a browser rendered or solved the challenge.
+  if (req.method === "GET" || req.method === "POST") {
+    let settled = !!(req.aborted || res.destroyed);
+    const abort = () => { settled = true; };
+    res.once("close", abort);
+    res.once("error", abort);
+    req.once("aborted", abort);
+    res.once("finish", () => {
+      if (settled) return;
+      settled = true;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        try { recordChallengeEvent("shown"); } catch {}
+      }
+    });
+  }
   res.type("html").send(htmlContent);
 }
 

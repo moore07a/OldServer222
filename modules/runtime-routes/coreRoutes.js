@@ -64,6 +64,8 @@ function createCoreRoutes(dependencies) {
     getRuntimeUsageSnapshot,
     getTrackedInFlightCount,
     getTrafficMetricsSnapshot,
+    getSharedTrafficMetricsSnapshot = async () => null,
+    getTrafficMetricsStorageStatus = () => ({ configured: false, ready: false }),
     handleRedirectCore,
     hash32,
     hashFirstSeg,
@@ -85,6 +87,7 @@ function createCoreRoutes(dependencies) {
     readLogFileTail,
     readRuntimeIncidents,
     recordChallengeBypassAttempt,
+    recordChallengeEvent = () => {},
     renderScannerSafePage,
     require,
     requireAdmin,
@@ -126,6 +129,7 @@ const handleDecryptChallengeData = (req, res) => {
     // extra sanity: ensure payload.ts is a number
     const issuedAt = typeof payload.ts === "number" ? payload.ts : 0;
     if (Date.now() - issuedAt > ttlMin * 60 * 1000) {
+      if (issuedAt > 0) recordChallengeEvent("payloadExpired");
       return res.json({ success: false, error: "Payload expired" });
     }
 
@@ -304,9 +308,14 @@ if (OPTIONAL_URL_PREFIX) {
   app.get(withOptionalUrlPrefix("/healthz"), handleLiveness);
 }
 
-const handleTrafficMetrics = (_req, res) => {
-  res.setHeader("Cache-Control", "private, no-store");
-  return res.json({ ok: true, ...getTrafficMetricsSnapshot() });
+const handleTrafficMetrics = async (_req, res, next) => {
+  try {
+    const shared = await getSharedTrafficMetricsSnapshot();
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.json({ ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus() });
+  } catch (error) {
+    return next(error);
+  }
 };
 app.get("/admin/traffic-metrics", requireAdmin, handleTrafficMetrics);
 if (OPTIONAL_URL_PREFIX) {
@@ -534,6 +543,7 @@ app.get("/favicon.ico", (_req, res) => {
 
 const createOperationalRoutes = require("../runtime-routes/operationalRoutes.js");
 createOperationalRoutes({
+  recordChallengeEvent,
   ACTIVE_REQUEST_DUMP_LIMIT,
   ACTIVE_REQUEST_TOP_PATH_LIMIT,
   AES_KEYS,

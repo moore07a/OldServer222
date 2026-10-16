@@ -347,9 +347,32 @@ const {
 });
 
 const createTrafficMetrics = require("./modules/runtime-utils/trafficMetrics.js");
-const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot } = createTrafficMetrics({
-  pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args)
+const createSharedTrafficMetricsStore = require("./modules/runtime-utils/sharedTrafficMetricsStore.js");
+const metricsRedisUrl = String(process.env.TRAFFIC_METRICS_REDIS_URL || process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "").trim();
+const metricsRedis = metricsRedisUrl ? new Redis(metricsRedisUrl, {
+  commandTimeout: 1000,
+  connectTimeout: 1000,
+  enableOfflineQueue: false,
+  autoResendUnfulfilledCommands: false,
+  maxRetriesPerRequest: 0,
+  retryStrategy: (attempt) => Math.min(attempt * 100, 2000)
+}) : null;
+if (metricsRedis) metricsRedis.on("error", () => {});
+const sharedTrafficMetrics = createSharedTrafficMetricsStore({
+  client: metricsRedis,
+  namespace: process.env.TRAFFIC_METRICS_NAMESPACE || "oldserver222"
 });
+const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot, recordChallengeEvent } = createTrafficMetrics({
+  pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args),
+  onRequest: sharedTrafficMetrics.recordRequest,
+  onChallengeEvent: sharedTrafficMetrics.recordChallengeEvent
+});
+const getSharedTrafficMetricsSnapshot = sharedTrafficMetrics.getSnapshot;
+const getTrafficMetricsStorageStatus = sharedTrafficMetrics.getStatus;
+async function closeMetrics() {
+  try { await sharedTrafficMetrics.close(); }
+  finally { if (metricsRedis) metricsRedis.disconnect(); }
+}
 const TRUST_CLOUDFLARE_XFF_CHAIN = process.env.TRUST_CLOUDFLARE_XFF_CHAIN === "1";
 const FORWARDER_AUTH_HEADER = "x-mds-forwarder-auth";
 const MDS_FORWARDER_AUTH_SECRET = String(
@@ -1039,6 +1062,7 @@ const {
   TURNSTILE_ORIGIN,
   verifyTurnstileToken
 } = createTurnstileSecurity({
+  recordChallengeEvent,
   ENFORCE_ACTION,
   EXPECT_HOSTNAME_ENTRIES,
   EXPECT_HOSTNAME_PATTERNS,
@@ -1106,6 +1130,7 @@ const {
   tryRenderTrustedScannerSafeHtmlForPayload,
   handleRedirectCore
 } = createRedirectCore({
+  recordChallengeEvent,
   ADMIN_HITS_MAX_ENTRIES,
   ADMIN_HIT_TTL_MS,
   BEHAVIORAL_CONFIG,
@@ -1371,6 +1396,7 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
 ({
   handleSecurityTxt: handleSecurityTxtImpl
 } = createCoreRoutes({
+  recordChallengeEvent,
   ACTIVE_REQUEST_DUMP_LIMIT,
   ACTIVE_REQUEST_TOP_PATH_LIMIT,
   AES_KEYS,
@@ -1433,6 +1459,8 @@ const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
   getRuntimeUsageSnapshot,
   getTrackedInFlightCount,
   getTrafficMetricsSnapshot,
+  getSharedTrafficMetricsSnapshot,
+  getTrafficMetricsStorageStatus,
   handleRedirectCore,
   hash32,
   hashFirstSeg,
@@ -1708,7 +1736,7 @@ process.on("warning", (warning) => {
 const createProcessLifecycle = require("./modules/runtime-lifecycle/processLifecycle.js");
 const { gracefulShutdown, scheduleFatalExit } = createProcessLifecycle({
   LOG_LISTENERS, SHUTDOWN_GRACE_MS, activeTrackedRequests, addLog,
-  buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter,
+  buildActiveRequestDiagnostics, clearBackgroundTasks, closeLogFileWriter, closeMetrics,
   formatRuntimeCorrelationSuffix, getProcessRuntimeMetadata,
   getRuntimeCorrelationMetadata, logActiveRequestDiagnostics, openSockets,
   recordRuntimeIncident, runtimeStats, safeLogValue, server, summarizeError
