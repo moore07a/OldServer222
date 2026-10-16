@@ -28,8 +28,13 @@ remain visible so a connected socket is not mistaken for durable delivery.
 
 The old `/view-log`, `/view-log-live`, and `/stream-log` URLs return `404 Not Found`,
 including their optional-prefix, trailing-slash, and child paths, for every HTTP
-method. They remain reserved so old monitoring requests cannot enter redirect
-or challenge handling or count as visitor traffic. They do not redirect to the
+method. Retired-name and prefix matching ignore case. If the configured prefix
+overlaps a retired name, its namespace takes precedence: with
+`OPTIONAL_URL_PREFIX=view-log`, `/view-log/healthz` remains a health endpoint,
+while `/view-log/stream-log` is retired. Bare retired URLs still return 404.
+Matching uses a comparison copy and never rewrites encrypted paths or query
+values. Retired routes remain reserved so old monitoring requests cannot enter
+redirect or challenge handling or count as visitor traffic. They do not redirect to the
 panel or expose a log stream. The standalone `live-log.html` viewer, stream
 listeners, broadcasts, stream heartbeats, and backlog replay have been removed.
 

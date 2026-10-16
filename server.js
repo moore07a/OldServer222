@@ -348,6 +348,8 @@ const {
 });
 
 const createTrafficMetrics = require("./modules/runtime-utils/trafficMetrics.js");
+const createRetiredLogPolicy = require("./modules/runtime-utils/retiredLogPolicy.js");
+const isRetiredLogPath = createRetiredLogPolicy({ optionalPrefix: SCANNER_OPTIONAL_URL_PREFIX });
 const createSharedTrafficMetricsStore = require("./modules/runtime-utils/sharedTrafficMetricsStore.js");
 const metricsRedisUrl = String(process.env.TRAFFIC_METRICS_REDIS_URL || process.env.REDIS_URL || process.env.REDIS_PRIVATE_URL || "").trim();
 const metricsRedis = metricsRedisUrl ? new Redis(metricsRedisUrl, {
@@ -365,6 +367,7 @@ const sharedTrafficMetrics = createSharedTrafficMetricsStore({
 });
 const { middleware: trackTrafficMetrics, getSnapshot: getTrafficMetricsSnapshot, recordChallengeEvent } = createTrafficMetrics({
   pathMatchesWithOptionalPrefix: (...args) => pathMatchesWithOptionalPrefix(...args),
+  isRetiredLogPath,
   onRequest: sharedTrafficMetrics.recordRequest,
   onChallengeEvent: sharedTrafficMetrics.recordChallengeEvent
 });
@@ -449,9 +452,8 @@ app.use((req, _res, next) => {
 app.use(trackTrafficMetrics);
 
 // Retired log URLs never enter scanners, body parsers, or redirect handling.
-const retiredLogPaths = ["/view-log", "/view-log-live", "/stream-log"];
 app.use((req, res, next) => {
-  if (!retiredLogPaths.some(route => pathMatchesWithOptionalPrefix(req.path, route))) return next();
+  if (!isRetiredLogPath(req.path)) return next();
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Referrer-Policy", "no-referrer");
   return res.status(404).type("text/plain").send("Not Found");

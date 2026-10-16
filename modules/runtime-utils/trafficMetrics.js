@@ -1,13 +1,13 @@
 "use strict";
 
 const { performance } = require("node:perf_hooks");
+const createRetiredLogPolicy = require("./retiredLogPolicy.js");
 
 const SAMPLE_LIMIT = 512;
 const KINDS = ["operational", "head", "prefetch", "get", "other"];
 const STATUS_CLASSES = ["1xx", "2xx", "3xx", "4xx", "5xx", "other"];
 const CHALLENGE_EVENTS = ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"];
-// Include retired log paths so their rejected child paths are not visitor traffic.
-const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug", "/stream-log", "/view-log", "/view-log-live"];
+const OPERATIONAL_SUBTREES = ["/admin", "/__debug", "/_debug"];
 const OPERATIONAL_PATHS = [
   "/health", "/readyz", "/healthz", "/livez",
   "/geo-debug",
@@ -17,7 +17,7 @@ const OPERATIONAL_PATHS = [
   "/_collect", "/_interact", "/_analytics.gif", "/__hp.gif"
 ];
 
-function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => performance.now(), onRequest = () => {}, onChallengeEvent = () => {} } = {}) {
+function createTrafficMetrics({ pathMatchesWithOptionalPrefix, isRetiredLogPath = createRetiredLogPolicy(), now = () => performance.now(), onRequest = () => {}, onChallengeEvent = () => {} } = {}) {
   const startedAt = new Date().toISOString();
   const matchesPath = pathMatchesWithOptionalPrefix || ((pathValue, expected, { allowChildren }) => (
     pathValue === expected || (allowChildren && pathValue.startsWith(`${expected}/`))
@@ -52,6 +52,7 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, now = () => perfo
     const pathValue = String(req.path || req.originalUrl || req.url || "/")
       .split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
     if (
+      isRetiredLogPath(pathValue) ||
       OPERATIONAL_PATHS.some((expected) => matchesPath(pathValue, expected, { allowChildren: false })) ||
       OPERATIONAL_SUBTREES.some((expected) => matchesPath(pathValue, expected, { allowChildren: true }))
     ) return "operational";
