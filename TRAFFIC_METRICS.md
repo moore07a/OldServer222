@@ -194,6 +194,10 @@ files are preserved for investigation rather than silently overwritten.
 Disk errors remain visible and never block ordinary visitor responses. Failed
 writes retain bounded pending state and retry in the background; if the worker
 itself times out or exits, restart the app after resolving the underlying issue.
+An initialized worker that still holds its lock can accept an immediate retry
+even while storage readiness reports the previous write failure. Conversion
+readiness remains false until a checkpoint succeeds. Locked, corrupt,
+uninitialized, closed, or terminated stores cannot use this retry path.
 Configured disk conversion writes return `503` when durable storage is not
 available. A volume backup is still needed if you need recovery after volume
 deletion or storage loss. Five GB comfortably holds these bounded aggregates;

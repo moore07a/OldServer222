@@ -105,6 +105,12 @@ bounded valid conversion dedupe, including previously configured IDs. Top-level
 risk counters still describe the current process; aggregate saved risk totals
 are available separately in `persistent.risk`.
 
+Changing a valid `RISK_NAMESPACE` deliberately starts fresh campaign counters
+and conversion dedupe for that namespace. HTTP, challenge, and aggregate risk
+totals still restore from the unchanged analytics namespace. The saved campaign
+state must pass full validation before this reset; changing namespaces does not
+allow malformed checkpoint data to be overwritten.
+
 ## Trusted backend conversions
 
 Conversions stay disabled until campaigns and a dedicated

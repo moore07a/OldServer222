@@ -56,6 +56,7 @@ test("only one process can own a namespace while different namespaces remain ind
   const contender = create();
   assert.equal(await contender.ready, false);
   assert.equal(contender.getStatus().lastError, "locked");
+  assert.equal(contender.getStatus().canWrite, false);
   assert.equal(await contender.save({ count: 99 }, { urgent: true }), false);
   const other = create({ namespace: "another" });
   assert.equal(await other.ready, true);
@@ -86,10 +87,13 @@ test("pending saves coalesce and urgent saves wait for the newest included gener
 test("startup must complete before state can be queued, and close flushes a pending checkpoint", async t => {
   const { create } = await setup(t);
   const store = create();
+  assert.equal(store.getStatus().canWrite, false);
   assert.equal(await store.save({ beforeStartup: true }), false);
   assert.equal(await store.ready, true);
+  assert.equal(store.getStatus().canWrite, true);
   assert.equal(await store.save({ final: 42 }), true);
   const closing = store.close();
+  assert.equal(store.getStatus().canWrite, false);
   assert.equal(store.close(), closing);
   assert.equal(await store.save({ afterClose: true }), false);
   assert.equal(await closing, true);
@@ -111,6 +115,7 @@ test("corrupt, oversized, and mismatched checkpoints are preserved and reject mu
     const store = create();
     assert.equal(await store.ready, false);
     assert.equal(store.getStatus().lastError, code);
+    assert.equal(store.getStatus().canWrite, false);
     assert.equal(await store.save({ overwrite: true }, { urgent: true }), false);
     assert.equal(await fs.readFile(filename, "utf8"), body);
   }
@@ -245,5 +250,6 @@ test("startup and unacknowledged writes have finite deadlines and stop their wor
   assert.equal(await writing.save({ uncertain: true }, { urgent: true }), false);
   assert.equal(writing.getStatus().lastError, "operation_timeout");
   assert.equal(writing.getStatus().ready, false);
+  assert.equal(writing.getStatus().canWrite, false);
   assert.equal(await writing.close(), false);
 });

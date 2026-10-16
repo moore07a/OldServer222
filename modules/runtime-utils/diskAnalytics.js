@@ -40,7 +40,14 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
   let interval = null;
   let closePromise = null;
 
-  function available() { return configured && initialized && !validationError && checkpoint.getStatus().ready; }
+  function available() { return configured && initialized && !closing && !validationError && checkpoint.getStatus().ready; }
+  function canWrite() {
+    if (!configured || !initialized || closing || validationError) return false;
+    const status = checkpoint.getStatus();
+    // Recoverable write errors make conversions unhealthy while the locked
+    // worker remains able to retry. Older injected stores expose only ready.
+    return status.canWrite === undefined ? status.ready === true : status.canWrite === true;
+  }
   function markDirty() { if (configured && initialized && !closing) { dirty = true; revision += 1; } }
   function count(object, key, amount = 1) { object[key] = Math.min(MAX, object[key] + amount); }
   function iso(value) { return typeof value === "string" && value.length <= 30 && Number.isFinite(Date.parse(value)); }
@@ -126,7 +133,7 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
     markDirty(); return true;
   }
   async function flush() {
-    if (!available()) return false;
+    if (!canWrite()) return false;
     if (!dirty) return checkpoint.flush();
     const capturedRevision = revision;
     let data;

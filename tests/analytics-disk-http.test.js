@@ -29,7 +29,7 @@ async function workspace(t, { invalidDirectory = false, storageMode = "explicit"
     await fs.rm(directory, { recursive: true, force: true });
   });
 
-  async function start() {
+  async function start({ riskNamespace = namespace } = {}) {
     const listener = net.createServer();
     listener.listen(0, "127.0.0.1");
     await once(listener, "listening");
@@ -55,7 +55,7 @@ async function workspace(t, { invalidDirectory = false, storageMode = "explicit"
         RATE_LIMIT_MAX_REQUESTS: "1000", CHALLENGE_VIEW_CAPACITY: "100", PUBLIC_ENABLE_BACKGROUND: "0",
         IPINFO_LITE_ENABLED: "0", GEO_ENRICH_IPAPI_ENABLED: "0", eSCANNER_CONFIG_URL: "",
         REDIS_URL: "", REDIS_PRIVATE_URL: "", TRAFFIC_METRICS_REDIS_URL: "", RISK_REDIS_URL: "",
-        TRAFFIC_METRICS_NAMESPACE: namespace, RISK_NAMESPACE: namespace,
+        TRAFFIC_METRICS_NAMESPACE: namespace, RISK_NAMESPACE: riskNamespace,
         ANALYTICS_STORAGE_DIR: storageMode === "auto" ? undefined : storageMode === "off" ? "off" : storageDir,
         RAILWAY_VOLUME_MOUNT_PATH: storageMode === "explicit" ? "" : directory,
         RISK_REPORTING_ENABLED: "1", RISK_IP_INTELLIGENCE_ENABLED: "0", RISK_CAMPAIGN_IDS: "ad_alpha",
@@ -189,6 +189,50 @@ test("disk analytics survive a crash, reset process metrics, and durably dedupli
   assert.equal(campaign(afterDuplicate).conversions, 1);
   disk.redact(afterDuplicate, [marker, eventId, challengeToken]);
   await checkOperationalRoutes(restarted);
+});
+
+test("a valid risk namespace change resets campaigns without discarding saved HTTP, challenge or aggregate risk totals", { timeout: 30000 }, async t => {
+  const disk = await workspace(t);
+  const original = await disk.start();
+  assert.equal((await original.request("/r?campaign_id=ad_alpha")).response.status, 400);
+  const tokenBody = Buffer.from(JSON.stringify({ next: "/r?d=fixture", ts: Date.now(), exp: Date.now() + 60000 })).toString("base64url");
+  const challengeToken = `${tokenBody}.${createHmac("sha256", disk.credentials.adminToken).update(tokenBody).digest("base64url")}`;
+  const fragment = await original.request("/challenge-fragment?campaign_id=ad_alpha", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ct: challengeToken })
+  });
+  assert.equal(fragment.response.status, 200);
+  const eventId = "namespace-switch-order";
+  assert.equal((await original.conversion(eventId)).json().duplicate, false);
+  const before = (await original.metrics()).json();
+  assert.equal(before.persistent.challenges.shown, 1);
+  assert.equal(before.persistent.risk.totals.observedRequests, 2);
+  assert.equal(campaign(before).conversions, 1);
+  await original.stop("SIGKILL");
+
+  const riskNamespace = `${disk.namespace}-next`;
+  const changed = await disk.start({ riskNamespace });
+  const restored = (await changed.metrics()).json();
+  assert.equal(restored.diskStorage.ready, true);
+  assert.equal(restored.diskStorage.lastError, null);
+  assert.equal(restored.persistent.startedAt, before.persistent.startedAt);
+  assert.ok(restored.persistent.total.requests >= before.persistent.total.requests);
+  assert.equal(restored.persistent.challenges.shown, 1);
+  assert.deepEqual(restored.persistent.risk, before.persistent.risk);
+  assert.equal(restored.risk.campaignWindow.storage.namespace, riskNamespace);
+  assert.equal(restored.risk.campaignWindow.scope, "disk");
+  assert.equal(campaign(restored).requests, 0);
+  assert.equal(campaign(restored).conversions, 0);
+  const newEvent = await changed.conversion(eventId);
+  assert.equal(newEvent.response.status, 200);
+  assert.equal(newEvent.json().duplicate, false, "the new namespace must not reuse old namespace dedupe hashes");
+  assert.equal(campaign((await changed.metrics()).json()).conversions, 1);
+  await changed.stop("SIGKILL");
+
+  const stable = await disk.start({ riskNamespace });
+  const duplicate = await stable.conversion(eventId);
+  assert.equal(duplicate.response.status, 200);
+  assert.equal(duplicate.json().duplicate, true, "new-namespace state must remain durable across another restart");
+  disk.redact((await stable.metrics()).json(), [eventId, challengeToken]);
 });
 
 test("a second process cannot write through an analytics directory owned by another live process", { timeout: 40000 }, async t => {

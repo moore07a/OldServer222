@@ -2,7 +2,11 @@
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
+const createCheckpointStore = require("../modules/runtime-utils/analyticsCheckpointStore.js");
 const createDiskAnalytics = require("../modules/runtime-utils/diskAnalytics.js");
 const createTrafficMetrics = require("../modules/runtime-utils/trafficMetrics.js");
 
@@ -16,10 +20,11 @@ function deferred() {
 }
 
 class FakeCheckpoint {
-  constructor({ data = null, ready = true, error = null } = {}) {
+  constructor({ data = null, ready = true, error = null, canWrite } = {}) {
     this.data = clone(data);
     this.ready = Promise.resolve(ready);
     this.statusReady = ready;
+    this.canWrite = canWrite;
     this.lastError = error;
     this.lastSaveAt = null;
     this.savedSequence = 0;
@@ -33,6 +38,7 @@ class FakeCheckpoint {
   getData() { this.reads += 1; return clone(this.data); }
   getStatus() {
     return { configured: true, backend: "disk", namespace: "test", ready: this.statusReady,
+      ...(this.canWrite === undefined ? {} : { canWrite: this.canWrite }),
       pending: 0, lastSaveAt: this.lastSaveAt, lastError: this.lastError };
   }
   async save(data, options) {
@@ -291,6 +297,79 @@ test("failed saves retain the last durable snapshot and recover without losing o
   assert.equal(analytics.getSnapshot().risk.totals.networkKnown, 1);
   assert.equal(analytics.getStatus().pending, 0);
   assert.equal(analytics.getStatus().lastError, null);
+});
+
+test("an unhealthy checkpoint with retained write capability retries without declaring conversions ready", async t => {
+  const { checkpoint, analytics } = harness(t, { checkpoint: new FakeCheckpoint({ canWrite: true }) });
+  await analytics.initialize();
+  const before = analytics.getSnapshot();
+  analytics.recordChallengeEvent("shown");
+  checkpoint.saveBehavior = () => false;
+  assert.equal(await analytics.flush(), false);
+  checkpoint.statusReady = false;
+  assert.equal(analytics.isReady(), false);
+  assert.equal(analytics.getStatus().lastError, "write_failed");
+  assert.deepEqual(analytics.getSnapshot(), before);
+  const gate = deferred();
+  checkpoint.saveBehavior = async () => {
+    await gate.promise;
+    checkpoint.statusReady = true;
+    return true;
+  };
+  const saves = checkpoint.saves.length;
+  const retry = analytics.flush();
+  assert.equal(checkpoint.saves.length, saves + 1, "manual flush retries despite unhealthy readiness");
+  assert.equal(analytics.isReady(), false, "conversion readiness must await successful durable acknowledgment");
+  gate.resolve();
+  assert.equal(await retry, true);
+  assert.equal(analytics.isReady(), true);
+  assert.equal(analytics.getSnapshot().challenges.shown, 1);
+  assert.equal(analytics.getStatus().lastError, null);
+
+  analytics.recordChallengeEvent("passed");
+  checkpoint.canWrite = false;
+  const refusedAt = checkpoint.saves.length;
+  assert.equal(await analytics.flush(), false, "an explicitly nonwritable checkpoint must not be retried");
+  assert.equal(checkpoint.saves.length, refusedAt);
+  checkpoint.canWrite = true;
+  await analytics.close();
+  assert.equal(await analytics.flush(), false, "closed adapters cannot write through an injected checkpoint");
+});
+
+test("manual adapter flush recovers a filesystem replacement failure before either interval runs", { timeout: 10000 }, async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "disk-analytics-retry-"));
+  const checkpoint = createCheckpointStore({ directory, namespace: "test", flushIntervalMs: 60000 });
+  const analytics = createDiskAnalytics({ checkpoint, namespace: "test", flushIntervalMs: 60000 });
+  t.after(async () => {
+    await analytics.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  assert.equal(await analytics.initialize(), true);
+  const filename = path.join(directory, "test.json");
+  const preserved = `${filename}.preserved`;
+  const original = await fs.readFile(filename, "utf8");
+  const durable = analytics.getSnapshot();
+  await fs.rename(filename, preserved);
+  await fs.mkdir(filename, { mode: 0o700 });
+  analytics.recordChallengeEvent("shown");
+  assert.equal(await analytics.flush(), false);
+  assert.equal(checkpoint.getStatus().ready, false);
+  assert.equal(checkpoint.getStatus().canWrite, true, "the worker still owns its lock after a recoverable write failure");
+  assert.equal(analytics.isReady(), false);
+  assert.equal(analytics.getStatus().lastError, "unsafe_file");
+  assert.deepEqual(analytics.getSnapshot(), durable);
+  assert.equal(await fs.readFile(preserved, "utf8"), original);
+  await fs.rmdir(filename);
+  await fs.rename(preserved, filename);
+  assert.equal(await analytics.flush(), true, "an immediate manual retry requires no checkpoint timer");
+  assert.equal(analytics.isReady(), true);
+  assert.equal(checkpoint.getStatus().ready, true);
+  assert.equal(analytics.getStatus().lastError, null);
+  assert.equal(analytics.getSnapshot().challenges.shown, 1);
+  assert.equal(JSON.parse(await fs.readFile(filename, "utf8")).data.http.challenges.shown, 1);
+  assert.doesNotMatch(JSON.stringify(analytics.getStatus()), /disk-analytics-retry-|\.preserved|\/tmp/);
+  await analytics.close();
+  assert.equal(checkpoint.getStatus().canWrite, false);
 });
 
 test("observations arriving during an asynchronous save remain dirty until a later durable save", async t => {

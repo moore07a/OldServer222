@@ -142,7 +142,7 @@ function createCampaignRiskStore({
     restoreAttempted = true;
     const timestamp = time();
     const validCount = value => Number.isSafeInteger(value) && value >= 0;
-    if (!state || typeof state !== "object" || Array.isArray(state) || state.version !== 1 || state.namespace !== namespace || !Number.isInteger(state.windowSec) || state.windowSec < 10 || state.windowSec > 3600 ||
+    if (!state || typeof state !== "object" || Array.isArray(state) || state.version !== 1 || typeof state.namespace !== "string" || !/^[A-Za-z0-9:_-]{1,80}$/.test(state.namespace) || !Number.isInteger(state.windowSec) || state.windowSec < 10 || state.windowSec > 3600 ||
       !validCount(state.windowStartedAt) || state.windowStartedAt % (state.windowSec * 1000) !== 0 || state.windowStartedAt > timestamp ||
       !Array.isArray(state.campaigns) || state.campaigns.length > 33 || !Array.isArray(state.dedupe) || state.dedupe.length > maxLocalConversionIds) return false;
     const rows = new Map();
@@ -165,6 +165,15 @@ function createCampaignRiskStore({
       dedupe.set(key, entry[2]);
     }
     rotate();
+    // HMAC inputs include the risk namespace. A valid namespace change starts a
+    // fresh campaign window/dedupe scope while allowing the enclosing HTTP and
+    // aggregate risk checkpoint to restore. Validate everything before reset.
+    if (state.namespace !== namespace) {
+      localStart = -1;
+      rotate();
+      localDedupe.clear();
+      return true;
+    }
     if (state.windowSec === windowSec && state.windowStartedAt === localStart) {
       for (const id of ids) if (rows.has(id)) local.set(id, rows.get(id));
     }

@@ -220,6 +220,7 @@ function createAnalyticsCheckpointStore({
   function getStatus() {
     return { configured: true, backend: "disk", namespace,
       ready: initialized && !unavailable && !closing && !lastError,
+      canWrite: initialized && !unavailable && !closing,
       lastSaveAt, pending: !!(pending || active),
       pendingBytes: (pending ? Buffer.byteLength(pending.body) : 0) + (active ? Buffer.byteLength(active.body) : 0),
       maxBytes, lastError };

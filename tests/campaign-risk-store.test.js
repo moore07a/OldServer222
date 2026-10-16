@@ -283,7 +283,7 @@ test("checkpoint restore rejects malformed, oversized or mismatched state atomic
   original.recordRequest({ campaignId: "summer", sourceHash: hash("one") });
   const state = original.exportState();
   const mutations = [
-    value => { value.version = 99; }, value => { value.namespace = "other"; },
+    value => { value.version = 99; }, value => { value.namespace = "invalid{namespace}"; },
     value => { value.windowSec = 9; }, value => { value.windowStartedAt = 900000; },
     value => { value.campaigns[0].requests = -1; }, value => { value.campaigns[0].proxy = 2; },
     value => { value.campaigns[0].id = "unsafe/id"; }, value => { value.campaigns[1] = value.campaigns[0]; },
@@ -415,4 +415,45 @@ test("checkpoint migration tolerates campaign and window changes without losing 
   assert.equal(readded.restoreState(changed.exportState()), true);
   assert.equal(campaign(await readded.getSnapshot(), "summer").requests, 0, "changed window configuration starts fresh counters");
   assert.equal((await readded.recordConversion(event)).duplicate, true);
+});
+
+test("valid namespace changes reset campaign hashes without rejecting the enclosing aggregate checkpoint", async t => {
+  const config = { now: () => 300000, campaignIds: ["summer"] };
+  const previous = createStore({ ...config, namespace: "old-risk" });
+  t.after(() => previous.close());
+  previous.recordRequest({ campaignId: "summer", sourceHash: hash("old-source"), challengePassed: true });
+  const event = { campaignId: "summer", eventIdHash: hash("old-event") };
+  await previous.recordConversion(event);
+  const state = previous.exportState();
+  const current = createStore({ ...config, namespace: "new-risk" });
+  t.after(() => current.close());
+  assert.equal(current.restoreState(state), true, "safe namespace migration preserves the enclosing checkpoint");
+  const report = await current.getSnapshot();
+  assert.ok(report.campaigns.every(row => row.requests === 0 && row.conversions === 0 && row.distinctSourcesEstimate === 0));
+  assert.equal(current.exportState().namespace, "new-risk");
+  assert.equal(current.exportState().dedupe.length, 0, "old namespace HMAC identifiers are not imported");
+  assert.equal((await current.recordConversion(event)).duplicate, false);
+  assert.equal(current.restoreState(state), false, "the one-attempt guard still applies");
+});
+
+test("namespace migration still rejects malformed saved namespaces, counters, bitmaps and dedupe", async t => {
+  const config = { now: () => 300000, campaignIds: ["summer"] };
+  const original = createStore({ ...config, namespace: "old-risk" });
+  t.after(() => original.close());
+  original.recordRequest({ campaignId: "summer", sourceHash: hash("source") });
+  const originalState = original.exportState();
+  for (const mutate of [
+    state => { state.namespace = "invalid{tag}"; }, state => { state.namespace = ""; },
+    state => { state.campaigns[0].requests = -1; }, state => { state.campaigns[0].hosting = 2; },
+    state => { state.campaigns[0].bitmap = "broken"; },
+    state => { state.dedupe = [["summer", "raw-event", 300000]]; }
+  ]) {
+    const state = JSON.parse(JSON.stringify(originalState));
+    mutate(state);
+    const current = createStore({ ...config, namespace: "new-risk" });
+    t.after(() => current.close());
+    assert.equal(current.restoreState(state), false, "a namespace change cannot bypass validation");
+    assert.equal(campaign(await current.getSnapshot()).requests, 0);
+    assert.equal(current.exportState().dedupe.length, 0);
+  }
 });
