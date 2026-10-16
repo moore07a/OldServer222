@@ -130,11 +130,17 @@ async function main() {
   const tokenBody = Buffer.from(JSON.stringify({ next: '/r?d=local-soak-fixture', ts: Date.now(), exp: Date.now() + (cfg.durationSec + 600) * 1000 })).toString('base64url');
   const challengeBody = JSON.stringify({ ct: `${tokenBody}.${createHmac('sha256', adminToken).update(tokenBody).digest('base64url')}` });
   const redisUrl = process.env.TRAFFIC_METRICS_TEST_REDIS_URL || '';
+  const fixtureNamespace = `panel-soak-${randomBytes(8).toString('hex')}`;
+  const riskCampaignId = 'soak_campaign';
+  // Ignore inherited risk credentials/provider switches/Redis endpoints entirely.
+  const fixtureEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('RISK_')));
   if (cfg.redisOutageSec && !redisUrl) throw new Error('Redis outage validation requires a test Redis URL');
   // The fault proxy belongs to this test. The supplied Redis service is never
   // stopped, paused, reconfigured, or otherwise modified by fault injection.
   const redisProxy = cfg.redisOutageSec ? await redisFaultProxy(redisUrl) : null;
   const outage = { enabled: Boolean(redisProxy), started: false, recovered: false, localReportsDuringOutage: 0, recoveredReports: 0, pendingPeak: 0 };
+  const riskScopes = new Set();
+  const riskSummary = { samples: 0, observerErrors: 0, providerLookups: 0, cacheEntriesPeak: 0, cacheQueuePeak: 0, cacheActivePeak: 0, pendingOperationsPeak: 0, localReportsDuringOutage: 0, recoveredReports: 0 };
   const agent = new http.Agent({ keepAlive: true, maxSockets: cfg.concurrency + cfg.panels + 8, maxFreeSockets: 4 });
   const pending = new Set();
   const timers = new Set();
@@ -211,7 +217,7 @@ async function main() {
       if (route === '/challenge-fragment' && response.status === 200) totals.challengeFragments++;
       // Intentionally malformed /r requests activate the existing validation
       // limiter after ten failures; its 429 is expected defensive behaviour.
-      const validationLimited = route === '/r' && expected === 400 && response.status === 429;
+      const validationLimited = route.split('?', 1)[0] === '/r' && expected === 400 && response.status === 429;
       const accepted = response.status === expected || validationLimited;
       if (validationLimited) totals.expectedValidationRateLimits++;
       if (response.status >= 400 && response.status < 500 && accepted) totals.expected4xx++;
@@ -240,6 +246,42 @@ async function main() {
     } catch { fail('Invalid health sample'); }
   }
 
+  function inspectRisk(metrics) {
+    const risk = metrics.risk;
+    assert.equal(risk.mode, 'report_only');
+    assert.equal(risk.classification, 'indicators_only');
+    assert.equal(risk.observerErrors, 0);
+    assert.equal(risk.intelligence.enabled, false);
+    assert.equal(risk.intelligence.providerStatus.enabled, false);
+    assert.equal(risk.intelligence.providerStatus.used, 0);
+    assert.equal(risk.intelligence.capabilities.residentialProxy, false);
+    assert.equal(risk.conversions.enabled, false);
+    const cache = risk.intelligence.cache;
+    assert.equal(cache.enabled, false);
+    assert.equal(cache.lookups, 0);
+    assert.ok(cache.cacheEntries >= 0 && cache.cacheEntries <= cache.limits.maxEntries && cache.limits.maxEntries <= 128);
+    assert.ok(cache.queued >= 0 && cache.queued <= cache.limits.maxQueue && cache.limits.maxQueue <= 8);
+    assert.ok(cache.active >= 0 && cache.active <= cache.limits.concurrency && cache.limits.concurrency <= 2);
+    const window = risk.campaignWindow;
+    assert.ok(['current_process', 'redis', 'unavailable'].includes(window.scope));
+    assert.equal(window.attribution, 'client_supplied');
+    assert.equal(window.campaigns.length, 2);
+    assert.ok(window.campaigns.every(row => [riskCampaignId, '__unattributed__'].includes(row.id)));
+    assert.equal(window.storage.configured, Boolean(redisUrl));
+    assert.ok(Number.isInteger(window.storage.pendingOperations) && window.storage.pendingOperations >= 0 && window.storage.pendingOperations <= window.storage.queueLimit && window.storage.queueLimit <= 128);
+    if (window.scope === 'unavailable') assert.equal(window.storage.fallbackScope, 'current_process');
+    riskSummary.samples++;
+    riskScopes.add(window.scope);
+    riskSummary.observerErrors = Math.max(riskSummary.observerErrors, risk.observerErrors);
+    riskSummary.providerLookups = Math.max(riskSummary.providerLookups, cache.lookups, risk.intelligence.providerStatus.used);
+    riskSummary.cacheEntriesPeak = Math.max(riskSummary.cacheEntriesPeak, cache.cacheEntries);
+    riskSummary.cacheQueuePeak = Math.max(riskSummary.cacheQueuePeak, cache.queued);
+    riskSummary.cacheActivePeak = Math.max(riskSummary.cacheActivePeak, cache.active);
+    riskSummary.pendingOperationsPeak = Math.max(riskSummary.pendingOperationsPeak, window.storage.pendingOperations);
+    if (outage.started && !outage.recovered && window.scope === 'unavailable') riskSummary.localReportsDuringOutage++;
+    if (outage.recovered && window.scope === 'redis' && window.storage.ready && !window.storage.lastError && window.storage.pendingOperations <= 1) riskSummary.recoveredReports++;
+  }
+
   async function pollPanel() {
     const response = await checked('/admin/traffic-metrics', 200, { authenticated: true });
     if (!response) return;
@@ -249,6 +291,7 @@ async function main() {
       const metrics = JSON.parse(response.body);
       assert.equal(metrics.ok, true);
       assert.equal(metrics.scope, 'current_process');
+      inspectRisk(metrics);
       if (redisUrl) assert.equal(metrics.storage.configured, true);
       outage.pendingPeak = Math.max(outage.pendingPeak, metrics.storage?.pendingObservations || 0);
       if (outage.started && !outage.recovered && metrics.shared === null) outage.localReportsDuringOutage++;
@@ -281,10 +324,19 @@ async function main() {
   process.once('SIGTERM', interrupt);
 
   try {
-    child = spawn(process.execPath, ['--max-old-space-size=256', 'server.js'], {
+    child = spawn(process.execPath, ['--max-old-space-size=256', '-e', `
+      // This reliability fixture never makes upstream HTTP requests. Preserve
+      // health checks with a deterministic successful Turnstile script probe.
+      globalThis.fetch = async (input, options = {}) => {
+        const url = String(input && input.url || input);
+        if (url === 'https://challenges.cloudflare.com/turnstile/v0/api.js' && options.method === 'HEAD') return new Response(null, { status: 200 });
+        throw new Error('soak fixture blocks upstream HTTP');
+      };
+      require('./server.js');
+    `], {
       cwd: path.resolve(__dirname, '..'),
       env: {
-        ...process.env, NODE_ENV: 'development', PORT: String(port),
+        ...fixtureEnvironment, NODE_ENV: 'development', PORT: String(port),
         AES_KEY_HEX: randomBytes(32).toString('hex'), AES_KEY: '', AES_KEYS: '', AES_KEY_SHA256: '',
         ADMIN_TOKEN: adminToken, DEBUG_SHOW_KEYS_ON_START: '0', DEBUG_ALLOW_PLAINTEXT_KEYS: '0',
         TURNSTILE_SITEKEY: '1x00000000000000000000AA', TURNSTILE_SECRET: '1x0000000000000000000000000000000AA',
@@ -295,7 +347,12 @@ async function main() {
         LOG_DIR: directory, LOG_FILE: path.join(directory, 'visitors.log'),
         NPM_CONFIG_LOGS_DIR: directory, IPINFO_LITE_ENABLED: '0',
         REDIS_URL: '', REDIS_PRIVATE_URL: '', TRAFFIC_METRICS_REDIS_URL: redisProxy ? redisProxy.url : redisUrl,
-        TRAFFIC_METRICS_NAMESPACE: `panel-soak-${randomBytes(8).toString('hex')}`, eSCANNER_CONFIG_URL: ''
+        TRAFFIC_METRICS_NAMESPACE: fixtureNamespace, eSCANNER_CONFIG_URL: '',
+        RISK_REPORTING_ENABLED: '1', RISK_IP_INTELLIGENCE_ENABLED: '0', RISK_IP_DAILY_BUDGET: '0',
+        RISK_CAMPAIGN_IDS: riskCampaignId, RISK_NAMESPACE: fixtureNamespace,
+        RISK_HASH_SECRET: randomBytes(32).toString('hex'), RISK_CONVERSION_TOKEN: '',
+        RISK_WINDOW_SECONDS: '300', RISK_IP_CACHE_MAX_ENTRIES: '128', RISK_IP_QUEUE_MAX: '8',
+        RISK_REDIS_URL: redisProxy ? redisProxy.url : redisUrl
       },
       stdio: ['ignore', 'ignore', 'ignore']
     });
@@ -318,16 +375,17 @@ async function main() {
     await checked('/admin/traffic-metrics', 401);
     metricsBefore = await pollPanel();
     if (redisUrl) {
-      for (let attempt = 0; attempt < 30 && !metricsBefore?.shared; attempt++) { await sleep(100); metricsBefore = await pollPanel(); }
+      for (let attempt = 0; attempt < 30 && (!metricsBefore?.shared || metricsBefore?.risk?.campaignWindow?.scope !== 'redis'); attempt++) { await sleep(100); metricsBefore = await pollPanel(); }
       assert.ok(metricsBefore?.shared, 'Test Redis must be available before load');
+      assert.equal(metricsBefore?.risk?.campaignWindow?.scope, 'redis', 'Risk Redis must be available before load');
     }
     await sampleHealth();
     const end = started + cfg.durationSec * 1000;
     const routes = [
-      ['/robots.txt', 200], ['/r', 400], ['/ads.txt', 200],
-      ['/admin/traffic-panel', 200, { authenticated: true }], ['/r', 400], ['/admin/traffic-panel.js', 200, { authenticated: true }],
+      ['/robots.txt', 200], [`/r?campaign_id=${riskCampaignId}`, 400], ['/ads.txt', 200],
+      ['/admin/traffic-panel', 200, { authenticated: true }], [`/r?campaign_id=${riskCampaignId}`, 400], ['/admin/traffic-panel.js', 200, { authenticated: true }],
       ['/challenge-fragment', 200, { method: 'POST', body: challengeBody }],
-      ['/.well-known/security.txt', 200], ['/r', 400], ['/stream-log', 404]
+      ['/.well-known/security.txt', 200], [`/r?campaign_id=${riskCampaignId}`, 400], ['/stream-log', 404]
     ];
     interval(async () => {
       if (Date.now() >= end) return;
@@ -395,6 +453,13 @@ async function main() {
     if (redisProxy && (!outage.started || !outage.recovered || !outage.localReportsDuringOutage || !outage.recoveredReports)) fail('Redis outage and local fallback/recovery were not demonstrated');
     if (redisUrl && (!metricsAfter?.shared || metricsAfter.storage.lastError || metricsAfter.storage.pendingObservations)) fail('Redis writes did not recover and drain');
     if (redisUrl && metricsAfter?.shared && metricsAfter.shared.challenges.shown < metricsAfter.challenges.shown) fail('Shared challenge counters omitted observations after recovery');
+    const finalRisk = metricsAfter?.risk;
+    const finalRiskWindow = finalRisk?.campaignWindow;
+    if (!finalRisk || finalRisk.totals.observedRequests <= 0) fail('Report-only risk observations did not execute');
+    if (redisProxy && (!riskSummary.localReportsDuringOutage || !riskSummary.recoveredReports)) fail('Risk Redis local fallback/recovery were not demonstrated');
+    // A successful read is still the single active command when its status is
+    // captured; <=1 here means all observation work drained before that read.
+    if (redisUrl && (finalRiskWindow?.scope !== 'redis' || !finalRiskWindow.storage.ready || finalRiskWindow.storage.lastError || finalRiskWindow.storage.pendingOperations > 1)) fail('Risk Redis observations did not recover and drain');
     result = {
       passed: failures.length === 0, smokeOnly: cfg.smoke,
       config: { ...cfg, output: undefined, redisEnabled: Boolean(redisUrl), panelPollIntervalMs: 5000, serverHeapLimitMb: 256 },
@@ -403,6 +468,11 @@ async function main() {
       final: finalHealth ? { inFlightRequests: finalHealth.inFlightRequestsExcludingCurrent, abortedRequests: finalHealth.abortedRequests, requestTimeouts: finalHealth.requestTimeouts, uncaughtExceptions: finalHealth.uncaughtExceptions, unhandledRejections: finalHealth.unhandledRejections, serverErrors: finalHealth.serverErrors, processWarnings: finalHealth.processWarnings, openSockets: finalHealth.resources.openSockets, sseListeners: finalHealth.resources.sseListeners, logQueueBytes: finalHealth.resources.logFileQueueBytes, maxEventLoopLagMs: finalHealth.maxObservedEventLoopLagMs } : null,
       metrics: { startedRequests: metricsBefore?.total?.requests, endedRequests: metricsAfter?.total?.requests, sharedStorageReady: metricsAfter?.storage?.ready ?? false },
       outage,
+      risk: { ...riskSummary, mode: finalRisk?.mode, scopes: [...riskScopes],
+        observedRequests: finalRisk?.totals.observedRequests, campaignScope: finalRiskWindow?.scope,
+        providerEnabled: finalRisk?.intelligence.enabled, pendingOperationsAtFinalRead: finalRiskWindow?.storage.pendingOperations,
+        droppedObservations: finalRiskWindow?.storage.droppedObservations, uncertainObservations: finalRiskWindow?.storage.uncertainObservations,
+        note: 'Provider disabled; no upstream lookups. Redis observations are bounded best effort and can be dropped during outage. Final pending slot may be the current snapshot read.' },
       sampleTail: samples.slice(-8), failures,
       limitation: 'Local HTTP test; deliberate disconnects are counted separately. A production proxy may record those disconnects as 499. Browser behaviour is verified separately.'
     };

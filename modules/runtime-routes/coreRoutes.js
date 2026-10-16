@@ -65,6 +65,7 @@ function createCoreRoutes(dependencies) {
     getTrafficMetricsSnapshot,
     getSharedTrafficMetricsSnapshot = async () => null,
     getTrafficMetricsStorageStatus = () => ({ configured: false, ready: false }),
+    trafficRiskAssessment = null,
     handleRedirectCore,
     hash32,
     hashFirstSeg,
@@ -307,10 +308,12 @@ if (OPTIONAL_URL_PREFIX) {
 
 const handleTrafficMetrics = async (_req, res, next) => {
   try {
-    const shared = await getSharedTrafficMetricsSnapshot();
+    const [shared, risk] = await Promise.all([
+      getSharedTrafficMetricsSnapshot(), trafficRiskAssessment ? trafficRiskAssessment.getSnapshot() : null
+    ]);
     res.setHeader("Cache-Control", "private, no-store");
     return res.json({
-      ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus(),
+      ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus(), risk,
       runtime: {
         uptimeSec: Math.floor(process.uptime()), memory: getRuntimeMemorySnapshot(),
         resources: getRuntimeResourceGauges(), inFlightRequests: getTrackedInFlightCount()
@@ -326,6 +329,21 @@ if (OPTIONAL_URL_PREFIX) {
 }
 
 const registerTrafficPanelRoutes = require("../admin-panel/registerTrafficPanelRoutes.js");
+const handleRiskConversion = async (req, res, next) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  if (!trafficRiskAssessment?.conversionEnabled) return res.status(404).type("text/plain").send("Not Found");
+  if (!trafficRiskAssessment.conversionAuthorized(req.get("authorization"))) return res.status(401).json({ ok: false, error: "Unauthorized" });
+  try {
+    const result = await trafficRiskAssessment.recordConversion(req.body);
+    const status = result.accepted ? 200 : result.reason === "capacity" ? 429 : result.reason === "unavailable" ? 503 : 400;
+    if (status === 429 || status === 503) res.setHeader("Retry-After", "5");
+    return res.status(status).json({ ok: result.accepted, ...result });
+  } catch (error) { return next(error); }
+};
+app.post("/admin/risk-conversions", handleRiskConversion);
+if (OPTIONAL_URL_PREFIX) app.post(withOptionalUrlPrefix("/admin/risk-conversions"), handleRiskConversion);
+
 registerTrafficPanelRoutes({ app, withOptionalUrlPrefix, optionalPrefix: OPTIONAL_URL_PREFIX });
 
 const handleTsClientLog = (req, res) => {

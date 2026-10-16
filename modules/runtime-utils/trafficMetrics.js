@@ -99,7 +99,7 @@ function createTrafficMetrics({ pathMatchesWithOptionalPrefix, isRetiredLogPath 
         if (completed) recordCompletion(group, statusClass, duration);
         else group.aborted += 1;
       }
-      try { onRequest({ kind, completed, statusClass, durationMs: duration }); } catch {}
+      try { onRequest({ kind, completed, statusClass, durationMs: duration }, req); } catch {}
     }
 
     res.on("finish", () => settle(true));

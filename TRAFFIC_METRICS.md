@@ -81,6 +81,12 @@ Purpose headers are client supplied and do not identify all automated traffic.
 The `get` group can also contain bots and repeat visits. None of these groups
 represents unique visitors, verified humans, destination arrivals, or conversions.
 
+The response also includes `risk`, displayed in the panel's report-only risk
+section. It contains current-process browser/network observations and a bounded
+campaign window with optional trusted conversion counts. Free IP intelligence
+is off by default. See [risk configuration and limits](RISK_ASSESSMENT.md) for
+opt-in instructions, conversion authentication, privacy, and storage bounds.
+
 ## Interpret the counters
 
 Each group and the total include:
@@ -191,7 +197,8 @@ protection decisions do not depend on these counters.
 
 Use the response mix and latency measurements to establish a baseline before
 tuning protection. A 4xx response is an HTTP outcome, not proof of a bot;
-conversion events would still be needed to assess advertising results. The
+linking trusted conversions to clicks would still be needed to assess advertising
+results. The
 article's claims about sub-100 ms detection and conversion
 improvements are not benchmarks for this application.
 

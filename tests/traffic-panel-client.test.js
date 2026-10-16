@@ -18,6 +18,38 @@ function eventTarget(extra = {}) {
 const flush = async () => { for (let step = 0; step < 12; step += 1) await Promise.resolve(); };
 const report = (requests = 0) => ({ ok: true, total: { requests }, shared: { total: { requests: requests * 2 } } });
 
+function viewElement(dataset = {}, tagName = "div") {
+  let content = "";
+  const children = [];
+  return eventTarget({
+    dataset, tagName, value: "", disabled: false, children,
+    get textContent() { return content + children.map((child) => child.textContent).join(""); },
+    set textContent(value) { content = String(value); children.splice(0); },
+    set innerHTML(value) { assert.fail("Panel values must be rendered as text, never HTML"); },
+    setAttribute() {},
+    appendChild(child) { children.push(child); return child; },
+    replaceChildren(...next) { content = ""; children.splice(0, children.length, ...next); }
+  });
+}
+
+function documentViewRoot() {
+  const html = renderTrafficPanel({ nonce: "test-nonce" });
+  const roles = new Map([...html.matchAll(/data-role="([^"]+)"/g)].map(([, name]) => [name, viewElement()]));
+  const fields = new Map([...html.matchAll(/data-value="([^"]+)"/g)].map(([, name]) => [name, viewElement({ value: name })]));
+  const root = {
+    querySelector(selector) {
+      const match = /^\[data-role="([^"]+)"\]$/.exec(selector);
+      assert.ok(match && roles.has(match[1]), `Unknown view element: ${selector}`);
+      return roles.get(match[1]);
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, "[data-value]");
+      return [...fields.values()];
+    }
+  };
+  return { root, roles, fields };
+}
+
 function harness({ root } = {}) {
   let at = 1000;
   let serial = 0;
@@ -26,7 +58,7 @@ function harness({ root } = {}) {
   const calls = [];
   const rendered = [];
   const states = [];
-  const document = eventTarget({ hidden: false });
+  const document = eventTarget({ hidden: false, createElement: (tagName) => viewElement({}, tagName) });
   const window = eventTarget({ location: { href: "https://app.example/campaign/admin/traffic-panel", origin: "https://app.example" } });
   const controller = createTrafficPanelController({
     window, document, root, metricsUrl: "/campaign/admin/traffic-metrics", AbortController,
@@ -236,31 +268,7 @@ test("logout and reconnect discard old work and fixed-size chart history never e
 });
 
 test("document view renders log error messages and timestamps as text and clears recovered errors", async t => {
-  function element(dataset = {}) {
-    let content = "";
-    return eventTarget({
-      dataset, value: "", disabled: false,
-      get textContent() { return content; },
-      set textContent(value) { content = String(value); },
-      set innerHTML(value) { assert.fail("Panel values must be rendered as text, never HTML"); },
-      setAttribute() {}
-    });
-  }
-  // Derive the real view's available elements from the rendered panel shell.
-  const html = renderTrafficPanel({ nonce: "test-nonce" });
-  const roles = new Map([...html.matchAll(/data-role="([^"]+)"/g)].map(([, name]) => [name, element()]));
-  const fields = new Map([...html.matchAll(/data-value="([^"]+)"/g)].map(([, name]) => [name, element({ value: name })]));
-  const root = {
-    querySelector(selector) {
-      const match = /^\[data-role="([^"]+)"\]$/.exec(selector);
-      assert.ok(match && roles.has(match[1]), `Unknown view element: ${selector}`);
-      return roles.get(match[1]);
-    },
-    querySelectorAll(selector) {
-      assert.equal(selector, "[data-value]");
-      return [...fields.values()];
-    }
-  };
+  const { root, fields } = documentViewRoot();
   const panel = harness({ root });
   t.after(() => panel.controller.destroy());
   const at = "2026-10-16T14:30:00.000Z";
@@ -275,6 +283,129 @@ test("document view renders log error messages and timestamps as text and clears
   panel.controller.refresh();
   await panel.complete(1, { ...report(2), runtime: { resources: { logFileLastError: null } } });
   assert.equal(logError.textContent, "None", "a recovered writer clears the prior error");
+});
+
+function riskReport(campaigns = []) {
+  return {
+    mode: "report_only", scope: "current_process", startedAt: "2026-10-16T14:00:00Z",
+    totals: { observedRequests: 11, headlessMarkers: 2, headerAnomalies: 0, networkKnown: 3, networkUnknown: 8, hostingIndicators: 1, proxyIndicators: 0, vpnIndicators: 0, residentialProxyIndicators: 999 },
+    intelligence: {
+      enabled: true, provider: "ipapi.is", capabilities: { hosting: true, proxy: true, vpn: true, residentialProxy: false },
+      providerStatus: { dailyBudget: 900, used: 900, remaining: 0, quotaScope: "process", failureCode: null },
+      cache: { active: 0, queued: 0, cacheEntries: 3, cacheHits: 4, failed: 0, timeouts: 0, queueDropped: 0, lastError: null }
+    },
+    campaignWindow: { scope: "redis", windowStartedAt: "2026-10-16T14:00:00Z", windowSeconds: 3600, attribution: "client_supplied", campaigns, storage: { configured: true, ready: true, pendingOperations: 0, droppedObservations: 0, uncertainObservations: 0, lastError: null } },
+    conversions: { enabled: true }, observerErrors: 0
+  };
+}
+
+test("risk section labels current-process scope, preserves zeroes, and renders unsupported residential intelligence honestly", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(5), risk: riskReport([{ id: "campaign-a", requests: 2, distinctSourcesEstimate: 1, headless: 0, hosting: 1, proxy: 0, vpn: 0, residentialProxy: 999, conversions: 0, unusualActivity: false }]) });
+  assert.equal(fields.get("risk.observedRequests").textContent, "11");
+  assert.equal(fields.get("risk.headerAnomalies").textContent, "0");
+  assert.equal(fields.get("risk.remaining").textContent, "0");
+  assert.equal(fields.get("risk.residentialProxyIndicators").textContent, "Not provided");
+  assert.match(roles.get("risk-note").textContent, /Current process only/);
+  assert.match(roles.get("campaign-window").textContent, /Shared Redis window/);
+  const cells = roles.get("campaign-rows").children[0].children;
+  assert.equal(cells[7].textContent, "Not provided");
+  assert.equal(cells[8].textContent, "0");
+  panel.controller.setScope("shared");
+  assert.equal(fields.get("requests").textContent, "10");
+  assert.equal(fields.get("risk.observedRequests").textContent, "11", "risk totals keep current-process scope when request scope changes");
+});
+
+test("campaign DOM is capped, replaced on refresh, and treats campaign IDs and errors as literal text", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const malicious = '<img src=x onerror="alert(1)">';
+  const campaigns = Array.from({ length: 80 }, (_, index) => ({ id: index ? `campaign-${index}` : malicious, requests: 10, distinctSourcesEstimate: 2, headless: 1, hosting: 0, proxy: 0, vpn: 0, conversions: 0, unusualActivity: index === 0, rawIP: "NEVER_RENDER_RAW_IP", sourceHash: "NEVER_RENDER_SOURCE_HASH" }));
+  const risk = riskReport(campaigns);
+  risk.intelligence.cache.lastError = malicious;
+  panel.controller.connect("test-token");
+  for (let index = 0; index < 8; index += 1) {
+    if (index) panel.controller.refresh();
+    await panel.complete(index, { ...report(index), risk });
+    assert.equal(panel.controller.getState().error, false, "the real document view successfully rendered risk data");
+    assert.equal(roles.get("campaign-rows").children.length, 33);
+    assert.equal(roles.get("campaign-rows").children[0].children[0].textContent, malicious);
+    assert.equal(roles.get("campaign-rows").textContent.includes("NEVER_RENDER"), false);
+    assert.equal(fields.get("risk.failure").textContent, malicious);
+  }
+  assert.equal(panel.controller.getState().sampleCount, 8, "risk rendering adds no separate history");
+  panel.controller.disconnect();
+  assert.equal(roles.get("campaign-rows").children.length, 0);
+  assert.equal(fields.get("risk.observedRequests").textContent, "—");
+  assert.equal(roles.get("risk-mode").textContent, "Unavailable");
+});
+
+test("disabled provider, disabled observations, and old reports show explicit unavailable states and clear prior rows", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const risk = riskReport([{ id: "campaign-a", requests: 1, distinctSourcesEstimate: 1, headless: 0 }]);
+  risk.intelligence.enabled = false;
+  risk.conversions.enabled = false;
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(1), risk });
+  assert.equal(fields.get("risk.provider").textContent, "Not enabled");
+  assert.equal(fields.get("risk.remaining").textContent, "Not enabled");
+  assert.equal(fields.get("risk.hostingIndicators").textContent, "Not provided");
+  assert.equal(roles.get("campaign-rows").children[0].children[8].textContent, "Not enabled");
+  assert.equal(panel.calls.length, 1, "risk display does not create provider requests");
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), risk: { ...risk, mode: "disabled" } });
+  assert.equal(roles.get("risk-mode").textContent, "Disabled");
+  assert.equal(fields.get("risk.observedRequests").textContent, "—");
+  assert.match(roles.get("campaign-rows").textContent, /No campaign report available/);
+  panel.controller.refresh();
+  await panel.complete(2, report(3));
+  assert.equal(panel.controller.getState().error, false);
+  assert.equal(roles.get("risk-mode").textContent, "Unavailable");
+  assert.equal(fields.get("risk.provider").textContent, "Unavailable");
+  assert.equal(fields.get("risk.residentialProxyIndicators").textContent, "Unavailable");
+  assert.equal(roles.get("campaign-rows").textContent.includes("campaign-a"), false);
+});
+
+test("campaign fallback rows are labeled local when Redis is unavailable", async t => {
+  const { root, roles } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const risk = riskReport([{ id: "local-only", requests: 1 }]);
+  risk.campaignWindow.scope = "unavailable";
+  risk.campaignWindow.storage = { configured: true, ready: false, pendingOperations: 2, droppedObservations: 3, uncertainObservations: 4, lastError: "read_failed", fallbackScope: "current_process" };
+  panel.controller.connect("token");
+  await panel.complete(0, { ...report(1), risk });
+  assert.match(roles.get("campaign-window").textContent, /Local fallback · shared Redis window unavailable/);
+  assert.match(roles.get("campaign-storage").textContent, /Redis unavailable/);
+  assert.match(roles.get("campaign-storage").textContent, /pending 2 · dropped 3 · uncertain 4/, "the view uses the actual campaign store status property names");
+  assert.equal(roles.get("campaign-rows").children[0].children[0].textContent, "local-only");
+  risk.campaignWindow.storage.fallbackScope = null;
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), risk });
+  assert.match(roles.get("campaign-window").textContent, /no campaign totals are shown/);
+  assert.equal(roles.get("campaign-rows").textContent.includes("local-only"), false);
+});
+
+test("saturated source cohorts display capacity instead of a misleading count", async t => {
+  const { root, roles } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const risk = riskReport([{ id: "at-capacity", requests: 10000, distinctSourcesEstimate: 1234, distinctSourcesSaturated: true }]);
+  panel.controller.connect("token");
+  await panel.complete(0, { ...report(1), risk });
+  assert.equal(roles.get("campaign-rows").children[0].children[2].textContent, "At capacity");
+  assert.equal(roles.get("campaign-rows").children[0].children[2].textContent.includes("1,234"), false);
+  risk.campaignWindow.campaigns[0].distinctSourcesSaturated = false;
+  risk.campaignWindow.campaigns[0].distinctSourcesEstimate = 0;
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), risk });
+  assert.equal(roles.get("campaign-rows").children[0].children[2].textContent, "0");
 });
 
 test("rendered shell escapes route and nonce attributes and contains no preloaded traffic data or inline handlers", () => {
