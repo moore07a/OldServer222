@@ -1,8 +1,9 @@
 "use strict";
 
 const TOTAL_FIELDS = ["evaluated", "matchedVpn", "matchedDatacenter", "blocked", "challenged", "allowedAfterChallenge", "allowedUnknown", "errors"];
-const OUTCOME_BITS = { blocked: 1, challenged: 2, allowedAfterChallenge: 4, allowedUnknown: 8 };
-const MODES = ["report", "challenge", "block"];
+// Keep the historical allowedAfterChallenge total for persisted-counter compatibility;
+// selected known matches now always block, so no new event can increment it.
+const OUTCOME_BITS = { blocked: 1, challenged: 2, allowedUnknown: 4 };
 const TRUE_VALUES = ["1", "true", "on", "yes"];
 const FALSE_VALUES = ["0", "false", "off", "no"];
 
@@ -10,10 +11,6 @@ function createNetworkPolicy({
   env = {}, lookupEnabled = false, observeNetwork = () => null, onEvent = () => {}, now = Date.now
 } = {}) {
   const configErrors = [];
-  const requestedMode = String(env.NETWORK_POLICY_MODE ?? "report").trim().toLowerCase() || "report";
-  const modeValid = MODES.includes(requestedMode);
-  const mode = modeValid ? requestedMode : "report";
-  if (!modeValid) configErrors.push("NETWORK_POLICY_MODE");
   function target(name) {
     const raw = String(env[name] ?? "0").trim().toLowerCase() || "0";
     if (TRUE_VALUES.includes(raw)) return true;
@@ -24,9 +21,7 @@ function createNetworkPolicy({
   const targets = { vpn: target("NETWORK_POLICY_VPN"), datacenter: target("NETWORK_POLICY_DATACENTER") };
   const unavailableReason = configErrors.length ? "invalid_configuration"
     : !lookupEnabled ? "intelligence_disabled" : !targets.vpn && !targets.datacenter ? "no_targets" : null;
-  const canEvaluate = unavailableReason === null;
-  const effectiveMode = canEvaluate ? mode : "report";
-  const enabled = canEvaluate && mode !== "report";
+  const enabled = unavailableReason === null;
   const startedAt = new Date(now()).toISOString();
   const totals = Object.fromEntries(TOTAL_FIELDS.map(field => [field, 0]));
   // Only the request itself owns this bookkeeping. Nothing stores an IP,
@@ -57,7 +52,7 @@ function createNetworkPolicy({
     let classification = "disabled";
     let reason = null;
     let action = "allow";
-    if (canEvaluate) {
+    if (enabled) {
       if (state && !state.evaluated) { state.evaluated = true; increment("evaluated"); }
       try {
         const network = state ? observeNetwork(req) : null;
@@ -85,10 +80,8 @@ function createNetworkPolicy({
         classification = "unknown";
         reason = "unknown";
       }
-      if (enabled) {
-        if (classification === "matched" && mode === "block") action = "block";
-        else if (classification !== "unmatched" && verified !== true) action = "challenge";
-      }
+      if (classification === "matched") action = "block";
+      else if (classification === "unknown" && verified !== true) action = "challenge";
     }
     const decision = Object.freeze({ action, classification, vpn, datacenter, reason });
     if (state) { state.decision = decision; state.verified = verified === true; }
@@ -100,14 +93,13 @@ function createNetworkPolicy({
     if (!enabled || !state || state.decision !== decision || (state.outcomes & OUTCOME_BITS[outcome])) return;
     const compatible = outcome === "blocked" ? decision.action === "block"
       : outcome === "challenged" ? decision.action === "challenge"
-        : outcome === "allowedAfterChallenge" ? mode === "challenge" && decision.action === "allow" && state.verified && decision.classification === "matched"
-          : decision.action === "allow" && state.verified && decision.classification === "unknown";
+        : decision.action === "allow" && state.verified && decision.classification === "unknown";
     if (!compatible) return;
     state.outcomes |= OUTCOME_BITS[outcome];
     increment(outcome);
   }
   function getSnapshot() {
-    return { scope: "current_process", startedAt, mode, effectiveMode, enabled, targets: { ...targets }, unavailableReason,
+    return { version: 2, scope: "current_process", startedAt, enabled, targets: { ...targets }, unavailableReason,
       totals: { ...totals }, configErrors: [...configErrors], unknownAction: "existing_challenge" };
   }
   return { check, record, getSnapshot };

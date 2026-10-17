@@ -1236,8 +1236,6 @@ function validateAndRedirect(finalUrl, req, res, options = {}) {
     }
     if (networkDecision.classification === "unknown") {
       recordNetworkPolicyDecision(req, "allowedUnknown", networkDecision);
-    } else if (networkDecision.classification === "matched") {
-      recordNetworkPolicyDecision(req, "allowedAfterChallenge", networkDecision);
     }
 
     addLog(`[REDIRECT] ip=${safeLogValue(ip)} -> ${safeLogValue(finalUrl, URL_DISPLAY_MAX_LENGTH)}`);

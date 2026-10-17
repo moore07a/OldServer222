@@ -7,8 +7,8 @@ URL-prefix variants work too. These observations do not change redirects,
 challenges, rate limits, blocking decisions, or health checks.
 
 Optional [VPN/datacenter access policy](NETWORK_POLICY.md) is configured
-separately. It can reuse these network classifications for challenges or
-blocking; risk observations themselves remain report-only.
+separately using two independent blocking switches; risk observations
+themselves remain report-only.
 
 This is not an AI model or proof that a visitor is fraudulent. Headless markers
 come from existing browser checks; header anomalies require at least two

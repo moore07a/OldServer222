@@ -34,7 +34,7 @@ function encrypt(url, key) {
   return Buffer.concat([iv, bytes, cipher.getAuthTag()]).toString("base64url");
 }
 
-async function fixture(t, { mode = "block", vpn = true, datacenter = false, enabled = true,
+async function fixture(t, { vpn = true, datacenter = false, enabled = true,
   dailyBudget = 900, providerDelay = 50, stallProvider = false, extraProfiles = {}, extraEnv = {} } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "network-policy-http-"));
   const listener = net.createServer();
@@ -109,7 +109,8 @@ async function fixture(t, { mode = "block", vpn = true, datacenter = false, enab
       TRAFFIC_METRICS_NAMESPACE: namespace, RISK_NAMESPACE: namespace, RISK_HASH_SECRET: randomBytes(32).toString("hex"),
       RISK_REPORTING_ENABLED: "1", RISK_IP_INTELLIGENCE_ENABLED: enabled ? "1" : "0", RISK_IP_PROVIDER: "ipquery",
       RISK_IP_DAILY_BUDGET: String(dailyBudget), RISK_IP_TIMEOUT_MS: "800",
-      NETWORK_POLICY_MODE: mode, NETWORK_POLICY_VPN: vpn ? "1" : "0", NETWORK_POLICY_DATACENTER: datacenter ? "1" : "0",
+      ...(vpn == null ? {} : { NETWORK_POLICY_VPN: vpn ? "1" : "0" }),
+      ...(datacenter == null ? {} : { NETWORK_POLICY_DATACENTER: datacenter ? "1" : "0" }),
       INTERSTITIAL_BYPASS_SECRET: "fixture-interstitial-bypass", TEST_NETWORK_PROFILES: JSON.stringify({ ...PROFILES, ...extraProfiles }),
       TEST_NETWORK_DELAY: String(providerDelay), TEST_NETWORK_STALL: stallProvider ? "1" : "0", ...extraEnv
     }, stdio: ["ignore", "ignore", "pipe", "ipc"]
@@ -201,7 +202,9 @@ function blocked(result) {
 test("strict VPN policy gates real redirect routes after verification and cannot be disabled by visitor parameters", { timeout: 30000 }, async t => {
   const app = await fixture(t);
   const before = await app.metrics();
-  assert.equal(before.networkPolicy.mode, "block");
+  assert.equal(before.networkPolicy.version, 2);
+  assert.equal(Object.hasOwn(before.networkPolicy, "mode"), false);
+  assert.equal(Object.hasOwn(before.networkPolicy, "effectiveMode"), false);
   assert.equal(before.networkPolicy.enabled, true);
   assert.deepEqual(before.networkPolicy.targets, { vpn: true, datacenter: false });
   await app.warm("8.8.8.8");
@@ -248,22 +251,39 @@ test("independent VPN and datacenter targets select either category without bloc
   }
 });
 
-test("challenge mode reuses existing verification and report mode never denies matching visitors", { timeout: 30000 }, async t => {
-  for (const mode of ["challenge", "report"]) await t.test(mode, async t => {
-    const app = await fixture(t, { mode, vpn: true, datacenter: true });
+test("zero or unset switches preserve existing verification and reporting even with a leftover mode variable", { timeout: 30000 }, async t => {
+  for (const [name, settings] of [
+    ["unset switches", { vpn: null, datacenter: null }],
+    ["explicit zero", { vpn: false, datacenter: false }],
+    ["obsolete block setting alone", { vpn: null, datacenter: null, extraEnv: { NETWORK_POLICY_MODE: "block" } }]
+  ]) await t.test(name, async t => {
+    const app = await fixture(t, settings);
     await app.warm("4.2.2.2");
     const unverified = await app.visit("4.2.2.2");
     assert.equal(unverified.response.status, 302);
     assert.match(unverified.response.headers.get("location") || "", /\/challenge\?/);
     redirected(await app.visit("4.2.2.2", { verified: true }));
     const report = await app.metrics();
-    assert.equal(report.networkPolicy.mode, mode);
+    assert.equal(report.networkPolicy.enabled, false);
+    assert.deepEqual(report.networkPolicy.targets, { vpn: false, datacenter: false });
+    assert.deepEqual(report.networkPolicy.configErrors, []);
+    assert.equal(report.networkPolicy.totals.evaluated, 0);
     assert.equal(report.networkPolicy.totals.blocked, 0);
-    if (mode === "challenge") {
-      assert.ok(report.networkPolicy.totals.challenged >= 1);
-      assert.equal(report.networkPolicy.totals.allowedAfterChallenge, 1);
-    }
     assert.equal(report.risk.intelligence.providerStatus.used, 1);
+    assert.ok(report.risk.totals.observedRequests > 0, "disabling category blocking keeps ordinary risk reporting active");
+  });
+});
+
+test("leftover report or challenge mode cannot override an enabled blocking switch", { timeout: 30000 }, async t => {
+  for (const legacyMode of ["report", "challenge"]) await t.test(legacyMode, async t => {
+    const app = await fixture(t, { vpn: true, datacenter: true, extraEnv: { NETWORK_POLICY_MODE: legacyMode } });
+    await app.warm("4.2.2.2");
+    blocked(await app.visit("4.2.2.2", { verified: true }));
+    const report = await app.metrics();
+    assert.equal(report.networkPolicy.enabled, true);
+    assert.equal(report.networkPolicy.totals.blocked, 1);
+    assert.equal(report.networkPolicy.totals.allowedAfterChallenge, 0);
+    assert.deepEqual(report.networkPolicy.configErrors, []);
   });
 });
 
@@ -304,7 +324,7 @@ test("unknown classification, provider failures, timeouts and exhausted budget p
 });
 
 test("network policy never overrides existing token, headless, geo, ASN and destination restrictions", { timeout: 30000 }, async t => {
-  const app = await fixture(t, { mode: "challenge", extraEnv: { HEADLESS_BLOCK: "1", BLOCKED_COUNTRIES: "CA", BLOCKED_ASNS: "AS64501" } });
+  const app = await fixture(t, { extraEnv: { HEADLESS_BLOCK: "1", BLOCKED_COUNTRIES: "CA", BLOCKED_ASNS: "AS64501" } });
   await app.warm("8.8.8.8");
   const invalid = await app.visit("8.8.8.8", { invalidToken: true });
   assert.equal(invalid.response.status, 302);
@@ -342,13 +362,12 @@ test("operational routes stay outside network policy and disabled intelligence s
   const after = await app.metrics();
   assert.deepEqual(after.networkPolicy.totals, before.networkPolicy.totals);
   assert.equal(after.risk.intelligence.providerStatus.used, 1);
-  await t.test("explicit network mode cannot itself authorize external lookup", async t => {
+  await t.test("blocking switches cannot themselves authorize external lookup", async t => {
     const disabled = await fixture(t, { enabled: false });
     redirected(await disabled.visit("8.8.8.8", { verified: true }));
     const report = await disabled.metrics();
     assert.equal(report.networkPolicy.enabled, false);
-    assert.equal(report.networkPolicy.effectiveMode, "report");
-    assert.ok(report.networkPolicy.unavailableReason);
+    assert.equal(report.networkPolicy.unavailableReason, "intelligence_disabled");
     assert.equal(report.risk.intelligence.providerStatus.used, 0);
     assert.equal(report.risk.intelligence.cache.lookups, 0);
     assert.equal(report.networkPolicy.totals.blocked, 0);
@@ -358,7 +377,6 @@ test("operational routes stay outside network policy and disabled intelligence s
     redirected(await disabled.visit("8.8.8.8", { verified: true }));
     const report = await disabled.metrics();
     assert.equal(report.networkPolicy.enabled, false);
-    assert.equal(report.networkPolicy.effectiveMode, "report");
     assert.equal(report.networkPolicy.unavailableReason, "no_targets");
     assert.equal(report.networkPolicy.totals.evaluated, 0);
     assert.equal(report.networkPolicy.totals.blocked, 0);
