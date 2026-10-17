@@ -6,6 +6,10 @@ network indicators, and a bounded campaign window. The authenticated
 URL-prefix variants work too. These observations do not change redirects,
 challenges, rate limits, blocking decisions, or health checks.
 
+Optional [VPN/datacenter access policy](NETWORK_POLICY.md) is configured
+separately using two independent blocking switches; risk observations
+themselves remain report-only.
+
 This is not an AI model or proof that a visitor is fraudulent. Headless markers
 come from existing browser checks; header anomalies require at least two
 existing soft signals. Legitimate automation can trigger either. Actual
@@ -67,6 +71,10 @@ types for `is_datacenter`, `is_proxy`, and `is_vpn`, never their raw response,
 visitor IP, or request URL. Unknown responses use the short negative-cache TTL.
 Panel polling is operational traffic and does not retry a visitor lookup;
 another eligible visitor request can retry after that TTL expires.
+
+Cache-hit counts describe cache accesses, not unique visitor requests. An
+enabled network policy can access the same cache during warmup, the final
+redirect check, and settled-request reporting.
 
 The default budget is 900 attempted lookups per rolling 24 hours **per running
 process**, including failures. It resets on restart and is not shared through

@@ -12,6 +12,8 @@ const createTrafficMetrics = require("../modules/runtime-utils/trafficMetrics.js
 
 const clone = value => structuredClone(value);
 const startedAt = 1700000000000;
+const NETWORK_POLICY_FIELDS = ["evaluated", "matchedVpn", "matchedDatacenter", "blocked", "challenged", "allowedAfterChallenge", "allowedUnknown", "errors"];
+const emptyNetworkPolicyTotals = () => Object.fromEntries(NETWORK_POLICY_FIELDS.map(field => [field, 0]));
 
 function deferred() {
   let resolve;
@@ -143,6 +145,9 @@ test("restarting restores durable aggregates and delegates campaign restoration 
   first.analytics.recordRequest({ kind: "get", completed: true, statusClass: "2xx", durationMs: 10 });
   first.analytics.recordChallengeEvent("expiredOrDuplicate");
   first.analytics.recordRisk({ networkUnknown: true });
+  first.analytics.recordNetworkPolicyEvent("evaluated");
+  first.analytics.recordNetworkPolicyEvent("matchedVpn");
+  first.analytics.recordNetworkPolicyEvent("challenged");
   assert.equal(exports, 1, "only initialization has exported a checkpoint");
   await first.analytics.flush();
   const durable = first.analytics.getSnapshot();
@@ -170,7 +175,107 @@ test("restarting restores durable aggregates and delegates campaign restoration 
   assert.equal(restarted.analytics.getSnapshot().total.requests, 2);
   assert.deepEqual(restarted.analytics.getSnapshot().total.latencyMs, { mean: 20, max: 30 });
   assert.equal(restarted.analytics.getSnapshot().challenges.expiredOrDuplicate, 1);
+  assert.deepEqual(restarted.analytics.getSnapshot().networkPolicy, durable.networkPolicy);
   assert.equal(restarted.checkpoint.data.campaigns.counters.welcome, 5);
+});
+
+test("network policy observations are fixed independent counters exposed only after durable acknowledgment", async t => {
+  const { checkpoint, analytics } = harness(t);
+  assert.equal(analytics.recordNetworkPolicyEvent("evaluated"), false);
+  await analytics.initialize();
+  const initial = analytics.getSnapshot();
+  assert.deepEqual(initial.networkPolicy, { scope: "disk", startedAt: new Date(startedAt).toISOString(), totals: emptyNetworkPolicyTotals() });
+  for (const field of NETWORK_POLICY_FIELDS) assert.equal(analytics.recordNetworkPolicyEvent(field), true);
+  assert.equal(analytics.recordNetworkPolicyEvent("blocked"), true);
+  assert.equal(checkpoint.saves.length, 1, "request callbacks do not start disk writes");
+  assert.deepEqual(analytics.getSnapshot(), initial, "unsaved policy events do not appear durable");
+  assert.equal(analytics.getStatus().pending, 1);
+  assert.equal(await analytics.flush(), true);
+  const totals = Object.fromEntries(NETWORK_POLICY_FIELDS.map(field => [field, field === "blocked" ? 2 : 1]));
+  assert.deepEqual(checkpoint.data.networkPolicy, { startedAt: new Date(startedAt).toISOString(), totals });
+  assert.deepEqual(analytics.getSnapshot().networkPolicy.totals, totals);
+  analytics.getSnapshot().networkPolicy.totals.blocked = -1;
+  assert.equal(analytics.getSnapshot().networkPolicy.totals.blocked, 2, "public snapshots do not alias mutable counters");
+  await analytics.close();
+  assert.equal(analytics.recordNetworkPolicyEvent("blocked"), false);
+
+  const restarted = harness(t, { checkpoint: new FakeCheckpoint({ data: checkpoint.data }), now: () => startedAt + 60000 });
+  assert.equal(await restarted.analytics.initialize(), true, "independent counters can exceed evaluated");
+  assert.deepEqual(restarted.analytics.getSnapshot().networkPolicy, { scope: "disk", startedAt: new Date(startedAt).toISOString(), totals });
+});
+
+test("legacy checkpoints restore existing analytics without replacement and add zeroed policy counters on the next save", async t => {
+  const legacy = await savedFixture(t);
+  delete legacy.networkPolicy;
+  legacy.campaigns = { version: 7, counters: { welcome: 9 } };
+  const previous = clone(legacy);
+  const { checkpoint, analytics } = harness(t, { checkpoint: new FakeCheckpoint({ data: legacy }), now: () => startedAt + 60000 });
+  let restored;
+  assert.equal(await analytics.initialize({
+    restoreState(state) { restored = clone(state); return true; },
+    exportState: () => clone(legacy.campaigns)
+  }), true);
+  assert.deepEqual(restored, previous.campaigns);
+  assert.equal(checkpoint.saves.length, 0, "reading a valid legacy checkpoint does not overwrite it");
+  assert.deepEqual(checkpoint.data, previous);
+  const snapshot = analytics.getSnapshot();
+  assert.equal(snapshot.total.requests, 1);
+  assert.equal(snapshot.challenges.shown, 1);
+  assert.equal(snapshot.risk.totals.observedRequests, 1);
+  assert.deepEqual(snapshot.networkPolicy, { scope: "disk", startedAt: new Date(startedAt + 60000).toISOString(), totals: emptyNetworkPolicyTotals() });
+  assert.equal(await analytics.flush(), true);
+  assert.equal(checkpoint.saves.length, 0, "an unchanged legacy checkpoint needs no migration write");
+  analytics.recordNetworkPolicyEvent("allowedUnknown");
+  assert.equal(await analytics.flush(), true);
+  assert.equal(checkpoint.data.version, 1);
+  assert.deepEqual(checkpoint.data.http, previous.http);
+  assert.deepEqual(checkpoint.data.risk, previous.risk);
+  assert.deepEqual(checkpoint.data.campaigns, previous.campaigns);
+  assert.deepEqual(checkpoint.data.networkPolicy.totals, { ...emptyNetworkPolicyTotals(), allowedUnknown: 1 });
+  assert.deepEqual(Object.keys(checkpoint.data).sort(), ["campaigns", "http", "networkPolicy", "risk", "version"]);
+});
+
+test("malformed policy checkpoints are rejected without replacing prior analytics", async t => {
+  const fixture = await savedFixture(t);
+  const mutations = [
+    data => { data.networkPolicy = null; },
+    data => { data.networkPolicy = []; },
+    data => { data.networkPolicy.startedAt = "invalid"; },
+    data => { delete data.networkPolicy.startedAt; },
+    data => { data.networkPolicy.extra = "private"; },
+    data => { data.networkPolicy.totals = []; },
+    data => { data.networkPolicy.totals.visitorIp = "192.0.2.1"; },
+    data => { delete data.networkPolicy.totals.errors; },
+    ...[-1, 0.5, "1", NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(value => data => { data.networkPolicy.totals.blocked = value; })
+  ];
+  for (const mutate of mutations) {
+    const original = clone(fixture);
+    mutate(original);
+    const { checkpoint, analytics } = harness(t, { checkpoint: new FakeCheckpoint({ data: original }) });
+    assert.equal(await analytics.initialize(), false);
+    assert.equal(analytics.getStatus().lastError, "analytics_invalid_state");
+    assert.equal(analytics.getSnapshot(), null);
+    assert.equal(analytics.recordNetworkPolicyEvent("evaluated"), false);
+    assert.equal(await analytics.flush(), false);
+    assert.equal(checkpoint.saves.length, 0);
+    assert.deepEqual(checkpoint.data, original);
+  }
+});
+
+test("policy events reject arbitrary labels without coercion and saturate safe counters", async t => {
+  const fixture = await savedFixture(t);
+  fixture.networkPolicy.totals.blocked = Number.MAX_SAFE_INTEGER;
+  const { checkpoint, analytics } = harness(t, { checkpoint: new FakeCheckpoint({ data: fixture }) });
+  await analytics.initialize();
+  const invalidLabels = [undefined, null, "", "__proto__", "constructor", "192.0.2.1", "https://private.example/", 1, Symbol("blocked"),
+    { toString() { throw new Error("must not coerce a visitor-controlled label"); } }];
+  for (const field of invalidLabels) assert.equal(analytics.recordNetworkPolicyEvent(field), false);
+  assert.equal(analytics.getStatus().pending, 0);
+  assert.equal(analytics.recordNetworkPolicyEvent("blocked"), true);
+  await analytics.flush();
+  assert.equal(analytics.getSnapshot().networkPolicy.totals.blocked, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(Object.keys(checkpoint.data.networkPolicy.totals), NETWORK_POLICY_FIELDS);
+  assert.doesNotMatch(JSON.stringify(checkpoint.data.networkPolicy), /192\.0\.2|private|example/);
 });
 
 test("invalid aggregate schemas fail closed and cannot overwrite the original checkpoint", async t => {
@@ -473,6 +578,7 @@ test("disabled disk analytics perform no initialization hooks or writes", async 
   assert.equal(analytics.recordRequest({ kind: "get", completed: true }), false);
   assert.equal(analytics.recordChallengeEvent("shown"), false);
   assert.equal(analytics.recordRisk({ networkKnown: true }), false);
+  assert.equal(analytics.recordNetworkPolicyEvent("evaluated"), false);
   analytics.markDirty();
   assert.equal(await analytics.flush(), false);
   assert.equal(analytics.getSnapshot(), null);

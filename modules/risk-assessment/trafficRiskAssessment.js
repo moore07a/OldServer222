@@ -83,6 +83,14 @@ function createTrafficRiskAssessment({
     evidence[event] = true;
     challengeEvidence.set(req, evidence);
   }
+  // Shared synchronous cache access for redirect enforcement. A miss only
+  // queues bounded background work; it never waits on the provider or records
+  // an extra traffic/campaign observation.
+  function observeNetwork(req) {
+    if (!externalEnabled || closed) return { state: "disabled", hosting: null, proxy: null, vpn: null, residentialProxy: null, source: null };
+    const identity = getRequestIdentity(req);
+    return cache.observe(typeof identity.keyIp === "string" ? identity.keyIp : "");
+  }
   function observe(req, { kind } = {}) {
     const evidence = req && typeof req === "object" ? challengeEvidence.get(req) : null;
     if (req && typeof req === "object") challengeEvidence.delete(req);
@@ -145,7 +153,7 @@ function createTrafficRiskAssessment({
     cache.close();
     try { await store.close(); } finally { redisClient?.disconnect?.(); }
   }
-  return { observe, recordChallengeOutcome, recordConversion, conversionAuthorized, getSnapshot, close, enabled, conversionEnabled,
+  return { observe, observeNetwork, intelligenceEnabled: externalEnabled, recordChallengeOutcome, recordConversion, conversionAuthorized, getSnapshot, close, enabled, conversionEnabled,
     exportPersistentState: () => store.exportState(), restorePersistentState: state => store.restoreState(state) };
 }
 

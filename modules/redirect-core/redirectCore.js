@@ -82,6 +82,8 @@ function createRedirectCore(dependencies) {
     pickScannerProfile,
     recordChallengeBypassAttempt,
     recordChallengeEvent = () => {},
+    checkNetworkPolicy = () => ({ action: "allow", classification: "disabled" }),
+    recordNetworkPolicyDecision = () => {},
     recordOffenderSignals,
     recordScannerIp,
     renderScannerSafeHtmlForScanner,
@@ -922,7 +924,7 @@ app.use(async (req, res, next) => {
   }
 });
 
-async function verifyTurnstileAndRateLimit(req, baseString) {
+async function verifyTurnstileAndRateLimit(req, baseString, networkDecision) {
   const identity = getRequestIdentity(req);
   const ip = identity.ip;
   const ua = req.get("user-agent") || "";
@@ -943,7 +945,7 @@ async function verifyTurnstileAndRateLimit(req, baseString) {
       maybeDenyForVisibleIpReputation(req, ip, "challenge_abuse", { detail: v.reason || "invalid" });
     }
     return {
-      redirect: createChallengeRedirect(baseString, req, "auth_invalid", {
+      redirect: createChallengeRedirect(baseString, req, networkDecision?.action === "challenge" && v.reason === "missing" ? "network_policy" : "auth_invalid", {
         host: (v.reason === "bad_hostname" && v.data && v.data.hostname) ? v.data.hostname : ""
       })
     };
@@ -1218,6 +1220,24 @@ function validateAndRedirect(finalUrl, req, res, options = {}) {
       return res.status(403).send("Unauthorized URL");
     }
 
+    // Every real destination redirect converges here, after existing hard
+    // security, verified Turnstile/rate limits, and destination validation.
+    // This cache-only decision does not await the intelligence provider.
+    const networkDecision = checkNetworkPolicy(req, { verified: req._challengeMetricsVerified === true });
+    if (networkDecision.action === "block") {
+      recordNetworkPolicyDecision(req, "blocked", networkDecision);
+      res.setHeader("Cache-Control", "private, no-store");
+      return res.status(403).send("Forbidden");
+    }
+    if (networkDecision.action === "challenge") {
+      recordNetworkPolicyDecision(req, "challenged", networkDecision);
+      res.setHeader("Cache-Control", "private, no-store");
+      return res.redirect(302, createChallengeRedirect(options.baseString, req, "network_policy"));
+    }
+    if (networkDecision.classification === "unknown") {
+      recordNetworkPolicyDecision(req, "allowedUnknown", networkDecision);
+    }
+
     addLog(`[REDIRECT] ip=${safeLogValue(ip)} -> ${safeLogValue(finalUrl, URL_DISPLAY_MAX_LENGTH)}`);
     addSpacer();
     if (req.method === "GET" && req._challengeMetricsVerified) {
@@ -1311,8 +1331,12 @@ async function handleRedirectCore(req, res, baseString){
       return res.status(securityCheck.status).send(securityCheck.message);
     }
 
-    const authCheck = await verifyTurnstileAndRateLimit(req, baseString);
+    // Starting a lookup can only enqueue background work. Existing bans,
+    // scanner rules, and country/ASN restrictions have already run above.
+    const networkDecision = checkNetworkPolicy(req, { verified: false });
+    const authCheck = await verifyTurnstileAndRateLimit(req, baseString, networkDecision);
     if (authCheck.redirect) {
+      if (networkDecision.action === "challenge") recordNetworkPolicyDecision(req, "challenged", networkDecision);
       return res.redirect(302, authCheck.redirect);
     }
     if (authCheck.blocked) {
@@ -1348,7 +1372,7 @@ async function handleRedirectCore(req, res, baseString){
     }
 
     const finalUrl = processEmailAndFinalizeUrl(decryptResult.finalUrl, decryptResult.emailPart);
-    return validateAndRedirect(finalUrl, req, res, { pinnedHost: decryptResult.pinnedHost, linkHash: decryptResult.linkHash });
+    return validateAndRedirect(finalUrl, req, res, { pinnedHost: decryptResult.pinnedHost, linkHash: decryptResult.linkHash, baseString });
   } catch (e) {
     addLog(`[REDIRECT-ERROR] ip=${safeLogValue(getClientIp(req))} path=${safeLogValue(req.originalUrl || '', PATH_TRUNCATE_LENGTH)} err=${safeLogValue(e?.message || 'unknown')}`);
     addSpacer();
