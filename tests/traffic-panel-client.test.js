@@ -299,6 +299,142 @@ function riskReport(campaigns = []) {
   };
 }
 
+function networkPolicyReport(overrides = {}) {
+  return {
+    scope: "current_process", startedAt: "2026-10-16T14:00:00Z", mode: "challenge", effectiveMode: "challenge", enabled: true,
+    targets: { vpn: true, datacenter: false }, unavailableReason: null, configErrors: [], unknownAction: "existing_challenge",
+    totals: { evaluated: 20, matchedVpn: 5, matchedDatacenter: 2, blocked: 0, challenged: 4, allowedAfterChallenge: 3, allowedUnknown: 1, errors: 0 },
+    ...overrides
+  };
+}
+
+test("network policy shows active block and challenge settings with independent current-process counters", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(5), networkPolicy: networkPolicyReport(), risk: riskReport() });
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Challenge");
+  assert.equal(fields.get("networkPolicy.effectiveMode").textContent, "Challenge");
+  assert.equal(fields.get("networkPolicy.targets").textContent, "VPN");
+  assert.equal(fields.get("networkPolicy.status").textContent, "Active");
+  assert.equal(fields.get("networkPolicy.unknownAction").textContent, "Existing challenge and security rules");
+  assert.equal(fields.get("networkPolicy.challenged").textContent, "4");
+  assert.equal(fields.get("networkPolicy.blocked").textContent, "0");
+  assert.match(roles.get("network-policy-note").textContent, /Current process only/);
+  assert.equal(roles.get("risk-mode").textContent, "Report only", "network enforcement does not relabel passive risk observations");
+  panel.controller.setScope("shared");
+  assert.equal(fields.get("requests").textContent, "10");
+  assert.equal(fields.get("networkPolicy.challenged").textContent, "4");
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Challenge");
+
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(6), networkPolicy: networkPolicyReport({ mode: "block", effectiveMode: "block", targets: { vpn: true, datacenter: true }, totals: { blocked: 2, challenged: 0 } }) });
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Block");
+  assert.equal(fields.get("networkPolicy.status").textContent, "Active");
+  assert.equal(fields.get("networkPolicy.targets").textContent, "VPN + Datacenter");
+  assert.equal(fields.get("networkPolicy.blocked").textContent, "2");
+  assert.equal(panel.controller.getState().scope, "shared");
+  assert.equal(panel.calls.length, 2, "policy rendering and scope changes use the same metrics requests");
+});
+
+test("network policy distinguishes report mode and inactive enforcement reasons", async t => {
+  const { root, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(1), networkPolicy: networkPolicyReport({ mode: "report", effectiveMode: "report", enabled: false }) });
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Report only");
+  assert.equal(fields.get("networkPolicy.status").textContent, "Report only · no network-policy enforcement");
+  for (const [index, unavailableReason, expected] of [[1, "intelligence_disabled", "Inactive · IP intelligence disabled"], [2, "no_targets", "Inactive · no networks selected"], [3, "invalid_configuration", "Inactive · invalid configuration"]]) {
+    panel.controller.refresh();
+    await panel.complete(index, { ...report(index + 1), networkPolicy: networkPolicyReport({ mode: "block", effectiveMode: "report", enabled: false, unavailableReason, configErrors: unavailableReason === "invalid_configuration" ? ["NETWORK_POLICY_MODE"] : [] }) });
+    assert.equal(fields.get("networkPolicy.mode").textContent, "Block");
+    assert.equal(fields.get("networkPolicy.effectiveMode").textContent, "Report only");
+    assert.equal(fields.get("networkPolicy.status").textContent, expected);
+    assert.equal(fields.get("networkPolicy.configErrors").textContent, unavailableReason === "invalid_configuration" ? "NETWORK_POLICY_MODE" : "None");
+  }
+});
+
+test("saved policy totals remain separate from current settings and never use shared Redis counters", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const payload = {
+    ...report(2), networkPolicy: networkPolicyReport(),
+    shared: { total: { requests: 99 }, networkPolicy: { totals: { blocked: 9999 } } },
+    persistent: { total: { requests: 200 }, networkPolicy: { scope: "disk", startedAt: "2026-10-15T14:00:00Z", totals: { blocked: 40, challenged: 50, allowedUnknown: 60 }, mode: "block" } }
+  };
+  panel.controller.connect("test-token");
+  await panel.complete(0, payload);
+  for (const scope of ["persistent", "shared", "current"]) {
+    panel.controller.setScope(scope);
+    assert.equal(fields.get("networkPolicy.mode").textContent, "Challenge", "saved settings cannot override current process settings");
+    assert.equal(fields.get("networkPolicy.blocked").textContent, "0");
+    assert.equal(fields.get("networkPolicy.disk.blocked").textContent, "40");
+    assert.equal(fields.get("networkPolicy.disk.challenged").textContent, "50");
+    assert.equal(fields.get("networkPolicy.disk.allowedUnknown").textContent, "60");
+    assert.match(roles.get("network-policy-disk-note").textContent, /Last saved disk totals/);
+    assert.match(roles.get("network-policy-disk-note").textContent, /do not combine separate replica volumes/);
+    assert.equal(roles.get("network-policy-disk-note").textContent.includes("Redis"), false);
+  }
+  assert.equal(panel.calls.length, 1);
+  panel.controller.refresh();
+  payload.persistent.networkPolicy.scope = "redis";
+  await panel.complete(1, payload);
+  assert.equal(fields.get("networkPolicy.disk.blocked").textContent, "Unavailable", "only disk-scoped saved policy totals are accepted");
+});
+
+test("network policy ignores raw unknown fields, rejects malformed counts and modes, and clears on disconnect", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  const secret = '<img src=x onerror="alert(1)">NEVER_RENDER_RAW_VALUE';
+  const policy = networkPolicyReport({
+    unavailableReason: "invalid_configuration", effectiveMode: "report", enabled: false,
+    configErrors: ["NETWORK_POLICY_VPN", secret, "NETWORK_POLICY_MODE"],
+    rawIP: secret, error: secret, details: { secret },
+    totals: { evaluated: 0, matchedVpn: -1, matchedDatacenter: Infinity, blocked: "7", challenged: {}, allowedAfterChallenge: 2, allowedUnknown: Number.MAX_SAFE_INTEGER + 1, errors: 1 }
+  });
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(1), networkPolicy: policy });
+  assert.equal(panel.controller.getState().error, false);
+  assert.equal(fields.get("networkPolicy.configErrors").textContent, "NETWORK_POLICY_MODE, NETWORK_POLICY_VPN");
+  assert.equal(fields.get("networkPolicy.evaluated").textContent, "0");
+  assert.equal(fields.get("networkPolicy.errors").textContent, "1");
+  for (const key of ["matchedVpn", "matchedDatacenter", "blocked", "challenged", "allowedUnknown"]) assert.equal(fields.get(`networkPolicy.${key}`).textContent, "—");
+  assert.equal([...fields.values(), ...roles.values()].some((element) => element.textContent.includes("NEVER_RENDER")), false);
+  panel.controller.refresh();
+  await panel.complete(1, { ...report(2), networkPolicy: networkPolicyReport({ mode: secret, effectiveMode: secret, unknownAction: secret, unavailableReason: secret }) });
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.status").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.blocked").textContent, "Unavailable");
+  assert.equal([...fields.values(), ...roles.values()].some((element) => element.textContent.includes("NEVER_RENDER")), false);
+  panel.controller.disconnect();
+  assert.equal(fields.get("networkPolicy.mode").textContent, "—");
+  assert.equal(fields.get("networkPolicy.errors").textContent, "—");
+  assert.equal(fields.get("networkPolicy.disk.blocked").textContent, "—");
+  assert.equal(roles.get("network-policy-note").textContent, "Connect to load network policy.");
+  assert.equal(panel.timers.size, 0);
+});
+
+test("old metrics reports explicitly mark the new policy unavailable and replace previously displayed policy", async t => {
+  const { root, roles, fields } = documentViewRoot();
+  const panel = harness({ root });
+  t.after(() => panel.controller.destroy());
+  panel.controller.connect("test-token");
+  await panel.complete(0, { ...report(1), networkPolicy: networkPolicyReport() });
+  panel.controller.refresh();
+  await panel.complete(1, report(2));
+  assert.equal(panel.controller.getState().error, false);
+  assert.equal(fields.get("networkPolicy.mode").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.effectiveMode").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.targets").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.errors").textContent, "Unavailable");
+  assert.equal(fields.get("networkPolicy.disk.challenged").textContent, "Unavailable");
+  assert.equal(roles.get("network-policy-note").textContent, "Network policy is unavailable in this report.");
+});
+
 test("risk section labels current-process scope, preserves zeroes, and renders unsupported residential intelligence honestly", async t => {
   const { root, roles, fields } = documentViewRoot();
   const panel = harness({ root });

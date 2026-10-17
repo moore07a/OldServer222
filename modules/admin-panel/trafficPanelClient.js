@@ -187,6 +187,35 @@ function createTrafficPanelController(options = {}) {
     listen(find("pause"), "click", () => paused ? resume() : pause());
     listen(find("disconnect"), "click", () => { tokenInput.value = ""; disconnect(); });
     listen(find("scope"), "change", (event) => setScope(event.target.value));
+    function renderNetworkPolicy(policy, persisted) {
+      const record = (value) => value && typeof value === "object" && !Array.isArray(value);
+      const modes = { report: "Report only", challenge: "Challenge", block: "Block" };
+      const knownMode = (value) => typeof value === "string" && Object.prototype.hasOwnProperty.call(modes, value);
+      const available = record(policy) && policy.scope === "current_process" && knownMode(policy.mode) && knownMode(policy.effectiveMode);
+      const active = available && policy.enabled === true && policy.effectiveMode !== "report";
+      const reasons = {
+        invalid_configuration: "Inactive · invalid configuration",
+        intelligence_disabled: "Inactive · IP intelligence disabled",
+        no_targets: "Inactive · no networks selected"
+      };
+      const reason = available && typeof policy.unavailableReason === "string" && Object.prototype.hasOwnProperty.call(reasons, policy.unavailableReason) ? reasons[policy.unavailableReason] : null;
+      const count = (value) => Number.isSafeInteger(value) && value >= 0 ? numeric(value) : "—";
+      const totals = available && record(policy.totals) ? policy.totals : {};
+      text("networkPolicy.mode", available ? modes[policy.mode] : "Unavailable");
+      text("networkPolicy.effectiveMode", available ? modes[policy.effectiveMode] : "Unavailable");
+      const targets = available && record(policy.targets) ? policy.targets : {};
+      text("networkPolicy.targets", !available ? "Unavailable" : [targets.vpn === true ? "VPN" : null, targets.datacenter === true ? "Datacenter" : null].filter(Boolean).join(" + ") || "None");
+      text("networkPolicy.status", !available ? "Unavailable" : reason || (active ? "Active" : policy.effectiveMode === "report" ? "Report only · no network-policy enforcement" : "Inactive"));
+      text("networkPolicy.unknownAction", available && policy.unknownAction === "existing_challenge" ? "Existing challenge and security rules" : "Unavailable");
+      const knownErrors = ["NETWORK_POLICY_MODE", "NETWORK_POLICY_VPN", "NETWORK_POLICY_DATACENTER"];
+      const errors = available && Array.isArray(policy.configErrors) ? knownErrors.filter((key) => policy.configErrors.includes(key)) : [];
+      text("networkPolicy.configErrors", !available ? "Unavailable" : errors.length ? errors.join(", ") : policy.unavailableReason === "invalid_configuration" ? "Invalid configuration" : "None");
+      find("network-policy-note").textContent = available ? `Current process only · since ${date(policy.startedAt)}. Settings and current counters do not change with Metric scope.` : "Network policy is unavailable in this report.";
+      for (const key of ["evaluated", "matchedVpn", "matchedDatacenter", "blocked", "challenged", "allowedAfterChallenge", "allowedUnknown", "errors"]) text(`networkPolicy.${key}`, available ? count(totals[key]) : "Unavailable");
+      const saved = record(persisted) && persisted.scope === "disk" && record(persisted.totals);
+      for (const key of ["blocked", "challenged", "allowedUnknown"]) text(`networkPolicy.disk.${key}`, saved ? count(persisted.totals[key]) : "Unavailable");
+      find("network-policy-disk-note").textContent = saved ? `Last saved disk totals · since ${date(persisted.startedAt)}. These totals belong to this volume; they do not combine separate replica volumes.` : "Saved network-policy totals are unavailable.";
+    }
     function renderRisk(risk) {
       const available = Boolean(risk && typeof risk === "object");
       const enabled = available && risk.mode === "report_only";
@@ -275,6 +304,8 @@ function createTrafficPanelController(options = {}) {
         find("chart-note").textContent = "No samples yet.";
         find("risk-mode").textContent = "Unavailable";
         find("risk-note").textContent = "Connect to load observations.";
+        find("network-policy-note").textContent = "Connect to load network policy.";
+        find("network-policy-disk-note").textContent = "Saved network-policy totals are unavailable.";
         find("campaign-window").textContent = "No campaign report loaded.";
         find("campaign-storage").textContent = "Campaign storage: unavailable.";
         find("campaign-rows").replaceChildren();
@@ -328,6 +359,7 @@ function createTrafficPanelController(options = {}) {
         const high = values.length ? Math.max(...values) : 0;
         find("chart").setAttribute("points", values.map((value, index) => `${values.length > 1 ? index * 600 / (values.length - 1) : 0},${100 - ((value - low) / (high - low || 1)) * 90}`).join(" "));
         find("chart-note").textContent = values.length ? `${numeric(values.length)} samples · min ${numeric(low)} · max ${numeric(high)}` : "No samples for this scope.";
+        renderNetworkPolicy(report.networkPolicy, report.persistent && report.persistent.networkPolicy);
         renderRisk(report.risk);
       }
     };

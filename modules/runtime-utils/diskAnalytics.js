@@ -6,6 +6,7 @@ const KINDS = ["operational", "head", "prefetch", "get", "other"];
 const STATUSES = ["1xx", "2xx", "3xx", "4xx", "5xx", "other"];
 const EVENTS = ["shown", "passed", "failed", "expired", "expiredOrDuplicate", "providerError", "redirected", "payloadExpired"];
 const RISK_FIELDS = ["observedRequests", "headlessMarkers", "headerAnomalies", "networkKnown", "networkUnknown", "hostingIndicators", "proxyIndicators", "vpnIndicators", "residentialProxyIndicators", "challengePassed", "challengeFailed"];
+const NETWORK_POLICY_FIELDS = ["evaluated", "matchedVpn", "matchedDatacenter", "blocked", "challenged", "allowedAfterChallenge", "allowedUnknown", "errors"];
 const MAX = Number.MAX_SAFE_INTEGER;
 const validNumber = value => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX;
 const validCount = value => validNumber(value) && Number.isInteger(value);
@@ -28,6 +29,7 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
   let http = { startedAt: new Date(now()).toISOString(), total: emptyGroup(),
     byKind: Object.fromEntries(KINDS.map(kind => [kind, emptyGroup()])), challenges: Object.fromEntries(EVENTS.map(event => [event, 0])) };
   let risk = { startedAt: http.startedAt, totals: Object.fromEntries(RISK_FIELDS.map(field => [field, 0])) };
+  let networkPolicy = { startedAt: http.startedAt, totals: Object.fromEntries(NETWORK_POLICY_FIELDS.map(field => [field, 0])) };
   let hooks = { exportState: () => null, restoreState: state => state === null };
   let initialized = false;
   let initialization = null;
@@ -61,12 +63,18 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
       (group.completed > 0 || (group.durationSumMs === 0 && group.durationMaxMs === 0));
   }
   function validData(data) {
-    if (!exactKeys(data, ["version", "http", "risk", "campaigns"]) || data.version !== 1 ||
+    // Version 1 checkpoints written before network enforcement have exactly the
+    // original four fields. Accept that shape without discarding prior totals.
+    const legacy = exactKeys(data, ["version", "http", "risk", "campaigns"]);
+    if ((!legacy && !exactKeys(data, ["version", "http", "risk", "campaigns", "networkPolicy"])) || data.version !== 1 ||
       !exactKeys(data.http, ["startedAt", "total", "byKind", "challenges"]) || !iso(data.http.startedAt) || !validGroup(data.http.total) ||
       !exactKeys(data.http.byKind, KINDS) || !KINDS.every(kind => validGroup(data.http.byKind[kind])) ||
       !exactKeys(data.http.challenges, EVENTS) || !EVENTS.every(event => validCount(data.http.challenges[event])) ||
       !exactKeys(data.risk, ["startedAt", "totals"]) || !iso(data.risk.startedAt) || !exactKeys(data.risk.totals, RISK_FIELDS) ||
-      !RISK_FIELDS.every(field => validCount(data.risk.totals[field]))) return false;
+      !RISK_FIELDS.every(field => validCount(data.risk.totals[field])) ||
+      (!legacy && (!exactKeys(data.networkPolicy, ["startedAt", "totals"]) || !iso(data.networkPolicy.startedAt) ||
+        !exactKeys(data.networkPolicy.totals, NETWORK_POLICY_FIELDS) ||
+        !NETWORK_POLICY_FIELDS.every(field => validCount(data.networkPolicy.totals[field]))))) return false;
     return ["requests", "completed", "aborted"].every(field =>
       KINDS.reduce((sum, kind) => sum + data.http.byKind[kind][field], 0) === data.http.total[field]) &&
       STATUSES.every(status => KINDS.reduce((sum, kind) => sum + data.http.byKind[kind].byStatusClass[status], 0) === data.http.total.byStatusClass[status]) &&
@@ -80,7 +88,8 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
   function summarize(data) {
     return { scope: "disk", namespace, startedAt: data.http.startedAt, total: summarizeGroup(data.http.total),
       byKind: Object.fromEntries(KINDS.map(kind => [kind, summarizeGroup(data.http.byKind[kind])])), challenges: { ...data.http.challenges },
-      risk: { scope: "disk", startedAt: data.risk.startedAt, totals: { ...data.risk.totals } } };
+      risk: { scope: "disk", startedAt: data.risk.startedAt, totals: { ...data.risk.totals } },
+      networkPolicy: { scope: "disk", startedAt: data.networkPolicy.startedAt, totals: { ...data.networkPolicy.totals } } };
   }
   function initialize(stateHooks) {
     if (initialization) return initialization;
@@ -93,7 +102,8 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
         if (!validData(data) || !hooks.restoreState(data.campaigns)) { validationError = "analytics_invalid_state"; return false; }
         http = clone(data.http);
         risk = clone(data.risk);
-        savedSummary = summarize(data);
+        if (Object.hasOwn(data, "networkPolicy")) networkPolicy = clone(data.networkPolicy);
+        savedSummary = summarize({ ...data, networkPolicy });
       }
       initialized = true;
       // Fixed aggregate snapshots are created outside request callbacks. Each
@@ -132,12 +142,16 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
     for (const field of RISK_FIELDS.slice(1)) if (!["networkKnown", "networkUnknown"].includes(field) && observation[field] === true) count(risk.totals, field);
     markDirty(); return true;
   }
+  function recordNetworkPolicyEvent(field) {
+    if (!configured || !initialized || closing || !NETWORK_POLICY_FIELDS.includes(field)) return false;
+    count(networkPolicy.totals, field); markDirty(); return true;
+  }
   async function flush() {
     if (!canWrite()) return false;
     if (!dirty) return checkpoint.flush();
     const capturedRevision = revision;
     let data;
-    try { data = { version: 1, http: clone(http), risk: clone(risk), campaigns: hooks.exportState() }; }
+    try { data = { version: 1, http: clone(http), risk: clone(risk), campaigns: hooks.exportState(), networkPolicy: clone(networkPolicy) }; }
     catch (_) { validationError = "analytics_export_failed"; return false; }
     const ok = await checkpoint.save(data, { urgent: true });
     if (ok) {
@@ -165,7 +179,7 @@ function createDiskAnalytics({ directory = "", namespace = "oldserver222", check
     })();
     return closePromise;
   }
-  return { initialize, recordRequest, recordChallengeEvent, recordRisk, markDirty, flush, getSnapshot, getStatus, close, isReady: available, configured };
+  return { initialize, recordRequest, recordChallengeEvent, recordRisk, recordNetworkPolicyEvent, markDirty, flush, getSnapshot, getStatus, close, isReady: available, configured };
 }
 
 module.exports = createDiskAnalytics;

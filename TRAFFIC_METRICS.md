@@ -166,6 +166,13 @@ continue to describe the current process. The disk API also retains aggregate
 risk totals under `persistent.risk`; campaign windows and conversion dedupe use
 the disk backend unless an explicit `RISK_REDIS_URL` selects Redis.
 
+Optional [VPN/datacenter enforcement](NETWORK_POLICY.md) has a separate
+`networkPolicy` API object and panel card. Its settings and counters always
+describe the current process. Saved aggregate decision counters appear under
+`persistent.networkPolicy` and are labeled separately in the panel. Existing
+checkpoints restore without losing earlier metrics; the new counters begin at
+zero. The panel itself remains read-only.
+
 Every five seconds, dirty aggregates are captured outside visitor callbacks
 and sent to one disk worker. The worker writes a temporary file, syncs it,
 atomically replaces the checkpoint, and syncs the directory. The API's

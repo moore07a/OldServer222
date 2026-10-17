@@ -66,6 +66,7 @@ function createCoreRoutes(dependencies) {
     getSharedTrafficMetricsSnapshot = async () => null,
     getTrafficMetricsStorageStatus = () => ({ configured: false, ready: false }),
     trafficRiskAssessment = null,
+    getNetworkPolicySnapshot = () => null,
     getPersistentTrafficMetricsSnapshot = () => null,
     getDiskAnalyticsStorageStatus = () => ({ configured: false, ready: false, backend: "disk" }),
     handleRedirectCore,
@@ -316,6 +317,7 @@ const handleTrafficMetrics = async (_req, res, next) => {
     res.setHeader("Cache-Control", "private, no-store");
     return res.json({
       ok: true, ...getTrafficMetricsSnapshot(), shared, storage: getTrafficMetricsStorageStatus(), risk,
+      networkPolicy: getNetworkPolicySnapshot(),
       persistent: getPersistentTrafficMetricsSnapshot(), diskStorage: getDiskAnalyticsStorageStatus(),
       runtime: {
         uptimeSec: Math.floor(process.uptime()), memory: getRuntimeMemorySnapshot(),

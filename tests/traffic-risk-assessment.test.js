@@ -12,6 +12,41 @@ const HASH_SECRET = "unit-hash-secret-abcdefghijklmnopqrstuvwxyz";
 const unknown = (state = "unknown") => ({ state, hosting: null, vpn: null, proxy: null, residentialProxy: null, source: null });
 const TOTAL_FIELDS = ["observedRequests", "headlessMarkers", "headerAnomalies", "networkKnown", "networkUnknown", "hostingIndicators", "proxyIndicators", "vpnIndicators", "residentialProxyIndicators", "challengePassed", "challengeFailed"];
 
+test("redirect policy cache access shares one lookup without recording visits or trusting display IPs", async t => {
+  const urls = [];
+  const risk = createTrafficRiskAssessment({ env: { RISK_IP_PROVIDER: "ipquery", RISK_IP_INTELLIGENCE_ENABLED: "1" },
+    hashSecret: HASH_SECRET, getRequestIdentity: () => ({ keyIp: "8.8.8.8", displayIp: "1.1.1.1", ip: "9.9.9.9" }),
+    fetch: async url => { urls.push(url); return new Response(JSON.stringify({ risk: { is_datacenter: false, is_proxy: false, is_vpn: true } })); } });
+  t.after(() => risk.close());
+  const req = { query: { ip: "4.4.4.4", vpn: false }, headers: { "x-forwarded-for": "4.4.4.4" } };
+  assert.equal(risk.intelligenceEnabled, true);
+  assert.equal(risk.observeNetwork(req).vpn, null);
+  assert.equal(risk.observeNetwork(req).vpn, null);
+  assert.equal(urls.length, 0, "cache access never waits for or directly calls the provider");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await risk.getSnapshot()).totals.observedRequests, 0);
+  assert.equal(risk.observeNetwork(req).vpn, true);
+  risk.observe(req, { kind: "get" });
+  const report = await risk.getSnapshot();
+  assert.deepEqual(urls, ["https://api.ipquery.io/8.8.8.8"]);
+  assert.equal(report.intelligence.providerStatus.used, 1);
+  assert.equal(report.totals.observedRequests, 1);
+  assert.equal(report.totals.networkKnown, 1);
+  assert.equal(report.totals.vpnIndicators, 1);
+  await risk.close();
+  assert.equal(risk.observeNetwork(req).state, "disabled");
+  assert.equal(urls.length, 1, "closed cache access cannot start another lookup");
+});
+
+test("disabled intelligence does not consult request identities through policy cache access", async t => {
+  const risk = createTrafficRiskAssessment({ env: { RISK_IP_PROVIDER: "ipquery" },
+    getRequestIdentity() { assert.fail("disabled intelligence must not read request identity"); },
+    fetch() { assert.fail("disabled intelligence must not fetch"); } });
+  t.after(() => risk.close());
+  assert.equal(risk.intelligenceEnabled, false);
+  assert.equal(risk.observeNetwork({}).state, "disabled");
+});
+
 test("explicit IPQuery selection uses the real bounded cache and reports cached network indicators", async t => {
   const calls = [];
   const risk = createTrafficRiskAssessment({

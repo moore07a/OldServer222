@@ -349,7 +349,9 @@ const {
 
 const createTrafficMetrics = require("./modules/runtime-utils/trafficMetrics.js");
 const createTrafficRiskAssessment = require("./modules/risk-assessment/trafficRiskAssessment.js");
+const createNetworkPolicy = require("./modules/risk-assessment/networkPolicy.js");
 let trafficRiskAssessment = null;
+let networkPolicy = null;
 const createRetiredLogPolicy = require("./modules/runtime-utils/retiredLogPolicy.js");
 const isRetiredLogPath = createRetiredLogPolicy({ optionalPrefix: SCANNER_OPTIONAL_URL_PREFIX });
 const createSharedTrafficMetricsStore = require("./modules/runtime-utils/sharedTrafficMetricsStore.js");
@@ -1162,6 +1164,8 @@ const {
   handleRedirectCore
 } = createRedirectCore({
   recordChallengeEvent,
+  checkNetworkPolicy: (req, options) => networkPolicy?.check(req, options) || { action: "allow", classification: "disabled" },
+  recordNetworkPolicyDecision: (req, outcome, decision) => networkPolicy?.record(req, outcome, decision),
   ADMIN_HITS_MAX_ENTRIES,
   ADMIN_HIT_TTL_MS,
   BEHAVIORAL_CONFIG,
@@ -1436,12 +1440,19 @@ trafficRiskAssessment = createTrafficRiskAssessment({
     return client;
   }
 });
+networkPolicy = createNetworkPolicy({
+  env: process.env,
+  lookupEnabled: trafficRiskAssessment.intelligenceEnabled,
+  observeNetwork: trafficRiskAssessment.observeNetwork,
+  onEvent: diskAnalytics.recordNetworkPolicyEvent
+});
 
 const createCoreRoutes = require("./modules/runtime-routes/coreRoutes.js");
 ({
   handleSecurityTxt: handleSecurityTxtImpl
 } = createCoreRoutes({
   trafficRiskAssessment,
+  getNetworkPolicySnapshot: () => networkPolicy.getSnapshot(),
   getPersistentTrafficMetricsSnapshot: diskAnalytics.getSnapshot,
   getDiskAnalyticsStorageStatus: diskAnalytics.getStatus,
   recordChallengeEvent,
